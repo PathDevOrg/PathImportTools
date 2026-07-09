@@ -1,0 +1,17 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./packages/aura-schema"
+    },
+    {
+      "path": "./packages/converter"
+    },
+    {
+      "path": "./packages/fixtures"
+    },
+    {
+      "path": "./apps/web"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "Path Import",
+  "short_name": "Path Import",
+  "description": "Convert timeline folders into Path import files locally.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f7f8f4",
+  "theme_color": "#f7f8f4",
+  "icons": [
+    {
+      "src": "/path-logo.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
