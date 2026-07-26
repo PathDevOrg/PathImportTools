@@ -57,13 +57,12 @@ type NormalizationContext = {
 
 type ClassifyProbe = {
   kind: SourceType | null;
-  json: unknown;
 };
 
 type ClassifiedFile = {
   path: string;
   size: number;
-  json: unknown;
+  readData: () => Promise<Uint8Array>;
 };
 
 type ConversionOptions = {
@@ -111,9 +110,13 @@ export async function scanImportEntries(entries: ImportFileHandle[]): Promise<Im
 }
 
 async function classifyJsonEntry(entry: ImportFileHandle): Promise<ClassifyProbe> {
-  const data = await entry.readData();
-  const json = parseJsonBytes(entry.path, data);
-  return { kind: classifySource(json), json };
+  try {
+    const data = await entry.readData();
+    const json = parseJsonBytes(entry.path, data);
+    return { kind: classifySource(json) };
+  } catch {
+    return { kind: null };
+  }
 }
 
 export async function convertImportEntries(entries: ImportFileEntry[], options: ConversionOptions = {}): Promise<ConversionResult> {
@@ -135,23 +138,17 @@ export async function convertImportFileHandles(entries: ImportFileHandle[], opti
     if (!isJsonPath(entry.path)) {
       continue;
     }
-    let probe: ClassifyProbe;
-    try {
-      probe = await classifyJsonEntry(entry);
-    } catch (error) {
-      recordDiagnostic(state, `Failed to read ${entry.path}: ${error instanceof Error ? error.message : String(error)}`);
-      continue;
-    }
+    const probe = await classifyJsonEntry(entry);
     if (!probe.kind) {
       continue;
     }
     detected.add(probe.kind);
     if (probe.kind === "arc-export") {
-      arcExportFiles.push({ path: entry.path, size: entry.size, json: probe.json });
+      arcExportFiles.push({ path: entry.path, size: entry.size, readData: entry.readData });
     } else if (probe.kind === "arc-backup") {
-      arcBackupFiles.push({ path: entry.path, size: entry.size, json: probe.json });
+      arcBackupFiles.push({ path: entry.path, size: entry.size, readData: entry.readData });
     } else {
-      movesFiles.push({ path: entry.path, size: entry.size, json: probe.json });
+      movesFiles.push({ path: entry.path, size: entry.size, readData: entry.readData });
     }
   }
 
@@ -190,9 +187,11 @@ function makeReadTracker(files: ClassifiedFile[], onProgress: ConversionOptions[
         bytesCompleted,
         bytesTotal
       });
+      const data = await file.readData();
+      const json = parseJsonBytes(file.path, data);
       completed += 1;
       bytesCompleted += file.size;
-      return file.json;
+      return json;
     }
   };
 }
@@ -430,13 +429,18 @@ async function importArcBackup(files: ClassifiedFile[], state: MutableState, tra
   const sampleFiles: ClassifiedFile[] = [];
 
   for (const file of files) {
-    const object = asObject(file.json);
-    if (object && stringValue(object.itemId) !== null) {
-      itemFiles.push(file);
-    } else if (object && stringValue(object.placeId) !== null) {
-      placeFiles.push(file);
-    } else if (Array.isArray(file.json) && arrayValue(file.json).some((sample) => stringValue(sample.sampleId) !== null && stringValue(sample.timelineItemId) !== null)) {
-      sampleFiles.push(file);
+    try {
+      const parsed = await tracker.readJson(file);
+      const object = asObject(parsed);
+      if (object && stringValue(object.itemId) !== null) {
+        itemFiles.push(file);
+      } else if (object && stringValue(object.placeId) !== null) {
+        placeFiles.push(file);
+      } else if (Array.isArray(parsed) && arrayValue(parsed).some((sample) => stringValue(sample.sampleId) !== null && stringValue(sample.timelineItemId) !== null)) {
+        sampleFiles.push(file);
+      }
+    } catch (error) {
+      recordDiagnostic(state, `Failed to classify ${file.path}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
