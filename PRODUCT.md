@@ -10,7 +10,7 @@ People who previously used Arc or Moves and now want to bring their historical t
 
 ## Product Purpose
 
-Path Import converts Arc and Moves backups into a Path import database entirely on the user's device. Success means the user can choose a backup, understand whether the data was recognized, follow conversion progress without anxiety, and finish with a database ready for Path import.
+Path Import converts Arc and Moves backups into a Path import database entirely on the user's device. Success means the user can choose a backup, understand whether the data was recognized, follow conversion progress without anxiety, and finish with a local database file ready for Path import.
 
 ## Brand Personality
 

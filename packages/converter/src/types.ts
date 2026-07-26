@@ -220,6 +220,10 @@ export type ImportReport = {
   diagnostics: string[];
 };
 
+export type StreamableAuraTable = "raw_gps" | "samples" | "raw_motion_activity" | "raw_pedometer";
+
+export type StreamableAuraRows = Pick<AuraRows, StreamableAuraTable>;
+
 export type ConversionResult = {
   rows: AuraRows;
   report: ImportReport;

@@ -19,12 +19,13 @@ import type {
   RawGPSRow,
   RawMotionActivityRow,
   RawPedometerRow,
-  RawVisitRow,
   RoutePathRow,
   SampleRow,
   SourceType,
   StayPoiRow,
-  StayRow
+  StayRow,
+  StreamableAuraRows,
+  StreamableAuraTable
 } from "./types.js";
 
 type JsonObject = Record<string, unknown>;
@@ -33,9 +34,13 @@ type MutableState = {
   rows: AuraRows;
   next: Record<keyof Omit<AuraRows, "stay_pois">, number>;
   poiCache: Map<string, number>;
+  arcPlaces: Map<string, { center: { lat: number; lon: number }; radius: number | null }>;
   itemMap: Map<string, { kind: "stay" | "move"; id: number }>;
+  pendingMovesStays: Map<string, StayRow[]>;
   diagnostics: string[];
   diagnosticCounts: Map<string, number>;
+  streamedCounts: Record<StreamableAuraTable, number>;
+  onRows?: <T extends StreamableAuraTable>(table: T, rows: StreamableAuraRows[T]) => void;
 };
 
 type SemanticRef = {
@@ -48,20 +53,31 @@ type NormalizationContext = {
   removedMoveIds: Set<number>;
   removedGapIds: Set<number>;
   stayRedirects: Map<number, number>;
-  moveRedirects: Map<number, number>;
 };
 
-type PathEntry = {
+type ClassifyProbe = {
+  kind: SourceType | null;
+  json: unknown;
+};
+
+type ClassifiedFile = {
   path: string;
-  size?: number;
+  size: number;
+  json: unknown;
 };
 
 type ConversionOptions = {
   onProgress?: (progress: ImportProgress) => void;
+  onRows?: <T extends StreamableAuraTable>(table: T, rows: StreamableAuraRows[T]) => void;
 };
 
 type ReadTracker = {
-  readJson: (entry: ImportFileHandle) => Promise<unknown>;
+  readJson: (file: ClassifiedFile) => Promise<unknown>;
+};
+
+type ArcItemSelection = {
+  path: string;
+  score: readonly [number, number, number, number];
 };
 
 const decoder = new TextDecoder();
@@ -69,15 +85,35 @@ const diagnosticSampleLimit = 20;
 
 const sourceOrder: SourceType[] = ["arc-export", "arc-backup", "moves-export"];
 
-export async function scanImportEntries(entries: PathEntry[]): Promise<ImportScan> {
-  const sourceTypes = sourceTypesForEntries(entries);
-  const supportedFileCount = entries.filter((entry) => isSupportedPath(entry.path)).length;
+export async function scanImportEntries(entries: ImportFileHandle[]): Promise<ImportScan> {
+  const detected = new Set<SourceType>();
+  let supportedFileCount = 0;
+  for (const entry of entries) {
+    if (!isJsonPath(entry.path)) {
+      continue;
+    }
+    try {
+      const probe = await classifyJsonEntry(entry);
+      if (probe.kind) {
+        detected.add(probe.kind);
+        supportedFileCount += 1;
+      }
+    } catch {
+      // ignore unreadable or unparseable files during scan
+    }
+  }
   return {
-    sourceTypes,
+    sourceTypes: sourceOrder.filter((source) => detected.has(source)),
     fileCount: entries.length,
     supportedFileCount,
     unknownFileCount: entries.length - supportedFileCount
   };
+}
+
+async function classifyJsonEntry(entry: ImportFileHandle): Promise<ClassifyProbe> {
+  const data = await entry.readData();
+  const json = parseJsonBytes(entry.path, data);
+  return { kind: classifySource(json), json };
 }
 
 export async function convertImportEntries(entries: ImportFileEntry[], options: ConversionOptions = {}): Promise<ConversionResult> {
@@ -89,54 +125,79 @@ export async function convertImportEntries(entries: ImportFileEntry[], options: 
 }
 
 export async function convertImportFileHandles(entries: ImportFileHandle[], options: ConversionOptions = {}): Promise<ConversionResult> {
-  const state = makeState();
+  const state = makeState(options.onRows);
   const sortedEntries = [...entries].sort((lhs, rhs) => lhs.path.localeCompare(rhs.path));
-  const tracker = makeReadTracker(sortedEntries, options.onProgress);
+  const arcExportFiles: ClassifiedFile[] = [];
+  const arcBackupFiles: ClassifiedFile[] = [];
+  const movesFiles: ClassifiedFile[] = [];
+  const detected = new Set<SourceType>();
+  for (const entry of sortedEntries) {
+    if (!isJsonPath(entry.path)) {
+      continue;
+    }
+    let probe: ClassifyProbe;
+    try {
+      probe = await classifyJsonEntry(entry);
+    } catch (error) {
+      recordDiagnostic(state, `Failed to read ${entry.path}: ${error instanceof Error ? error.message : String(error)}`);
+      continue;
+    }
+    if (!probe.kind) {
+      continue;
+    }
+    detected.add(probe.kind);
+    if (probe.kind === "arc-export") {
+      arcExportFiles.push({ path: entry.path, size: entry.size, json: probe.json });
+    } else if (probe.kind === "arc-backup") {
+      arcBackupFiles.push({ path: entry.path, size: entry.size, json: probe.json });
+    } else {
+      movesFiles.push({ path: entry.path, size: entry.size, json: probe.json });
+    }
+  }
 
-  await importArcExport(sortedEntries, state, tracker);
-  await importArcBackup(sortedEntries, state, tracker);
-  await importMovesExport(sortedEntries, state, tracker);
+  const tracker = makeReadTracker([...arcExportFiles, ...arcBackupFiles, ...movesFiles], options.onProgress);
+
+  await importArcExport(arcExportFiles, state, tracker);
+  await importArcBackup(arcBackupFiles, state, tracker);
+  await importMovesExport(movesFiles, state, tracker);
 
   normalizeTimeline(state, options.onProgress);
-  const report = makeReport(state, entries.length, sourceTypesForEntries(entries), options.onProgress);
+  const report = makeReport(state, entries.length, sourceOrder.filter((source) => detected.has(source)), options.onProgress);
   return { rows: state.rows, report };
 }
 
-function makeReadTracker(entries: ImportFileHandle[], onProgress: ConversionOptions["onProgress"]): ReadTracker {
-  const supportedEntries = entries.filter((entry) => isSupportedPath(entry.path));
-  const total = supportedEntries.length;
-  const bytesTotal = supportedEntries.reduce((sum, entry) => sum + entry.size, 0);
+function makeReadTracker(files: ClassifiedFile[], onProgress: ConversionOptions["onProgress"]): ReadTracker {
+  const total = files.length;
+  const bytesTotal = files.reduce((sum, file) => sum + file.size, 0);
   let completed = 0;
   let bytesCompleted = 0;
 
   return {
-    readJson: async (entry) => {
+    readJson: async (file) => {
       onProgress?.({
         phase: "read",
-        message: `Reading ${entry.path}`,
+        message: `Reading ${file.path}`,
         completed,
         total,
         bytesCompleted,
         bytesTotal
       });
-      const data = await entry.readData();
-      const json = parseJsonBytes(entry.path, data);
-      completed += 1;
-      bytesCompleted += entry.size;
       onProgress?.({
         phase: "parse",
-        message: `Parsed ${entry.path}`,
+        message: `Parsed ${file.path}`,
         completed,
         total,
         bytesCompleted,
         bytesTotal
       });
-      return json;
+      completed += 1;
+      bytesCompleted += file.size;
+      return file.json;
     }
   };
 }
 
-function makeState(): MutableState {
+function makeState(onRows?: ConversionOptions["onRows"]): MutableState {
   return {
     rows: {
       pois: [],
@@ -164,52 +225,89 @@ function makeState(): MutableState {
       no_data_gaps: 1
     },
     poiCache: new Map(),
+    arcPlaces: new Map(),
     itemMap: new Map(),
+    pendingMovesStays: new Map(),
     diagnostics: [],
-    diagnosticCounts: new Map()
+    diagnosticCounts: new Map(),
+    streamedCounts: {
+      raw_gps: 0,
+      samples: 0,
+      raw_motion_activity: 0,
+      raw_pedometer: 0
+    },
+    onRows
   };
 }
 
-function sourceTypesForEntries(entries: PathEntry[]): SourceType[] {
-  const detected = new Set<SourceType>();
-  for (const entry of entries) {
-    const normalized = normalizePath(entry.path);
-    if (isArcExportPath(normalized)) {
-      detected.add("arc-export");
+function classifySource(json: unknown): SourceType | null {
+  const object = asObject(json);
+  if (object) {
+    if (Array.isArray(object.timelineItems) && object.timelineItems.length > 0) {
+      for (const candidate of arrayValue(object.timelineItems)) {
+        if (arcItemKey(candidate) !== null) {
+          return "arc-export";
+        }
+      }
     }
-    if (isArcBackupPath(normalized)) {
-      detected.add("arc-backup");
+    if (stringValue(object.itemId) !== null) {
+      return "arc-backup";
     }
-    if (isMovesExportPath(normalized)) {
-      detected.add("moves-export");
+    if (stringValue(object.placeId) !== null && (numberValue(asObject(object.center)?.latitude) !== null || locationFrom(object.center) !== null || locationFrom(object.location) !== null)) {
+      return "arc-backup";
     }
   }
-  return sourceOrder.filter((source) => detected.has(source));
+  if (Array.isArray(json)) {
+    const items = arrayValue(json);
+    const first = items[0];
+    if (first && movesDayLooksLikeStoryline(first)) {
+      return "moves-export";
+    }
+    if (first && stringValue(first.sampleId) !== null && stringValue(first.timelineItemId) !== null) {
+      return "arc-backup";
+    }
+  }
+  return null;
 }
 
-function isSupportedPath(path: string): boolean {
-  const normalized = normalizePath(path);
-  return isJsonPath(normalized) && (isArcExportPath(normalized) || isArcBackupPath(normalized) || isMovesExportPath(normalized));
+function movesDayLooksLikeStoryline(day: JsonObject): boolean {
+  if (stringValue(day.date) === null) {
+    return false;
+  }
+  const segments = arrayValue(day.segments);
+  if (segments.length === 0) {
+    return false;
+  }
+  for (const segment of segments) {
+    if (stringValue(segment.startTime) === null || stringValue(segment.endTime) === null) {
+      return false;
+    }
+    const type = stringValue(segment.type);
+    if (type === "place") {
+      if (placeIdentifier(segment.place) === null) {
+        return false;
+      }
+    } else if (type === "move") {
+      if (arrayValue(segment.activities).length === 0) {
+        return false;
+      }
+    } else {
+      return false;
+    }
+  }
+  return true;
 }
 
-function normalizePath(path: string): string {
-  return path.replaceAll("\\", "/");
+function placeIdentifier(value: unknown): string | null {
+  const object = asObject(value);
+  if (!object) {
+    return null;
+  }
+  return stringValue(object.id) ?? numberValue(object.id)?.toString() ?? null;
 }
 
 function isJsonPath(path: string): boolean {
   return path.endsWith(".json") || path.endsWith(".json.gz");
-}
-
-function isArcExportPath(path: string): boolean {
-  return path.includes("Export/JSON/Daily/") || path.includes("/Export/JSON/Daily/");
-}
-
-function isArcBackupPath(path: string): boolean {
-  return path.includes("Previous Backups ") || path.includes("/Place/") || path.includes("/TimelineItem/") || path.includes("/LocomotionSample/");
-}
-
-function isMovesExportPath(path: string): boolean {
-  return path.includes("moves_export/json/daily/storyline/") || path.includes("/json/daily/storyline/storyline_");
 }
 
 function parseJsonBytes(path: string, data: Uint8Array): unknown {
@@ -246,14 +344,44 @@ function locationFrom(value: unknown): { lat: number; lon: number } | null {
   return lat !== null && lon !== null && validLatLon(lat, lon) ? { lat, lon } : null;
 }
 
-async function importArcExport(entries: ImportFileHandle[], state: MutableState, tracker: ReadTracker): Promise<void> {
-  const files = entries.filter((entry) => isJsonPath(entry.path) && isArcExportPath(normalizePath(entry.path)));
+async function importArcExport(files: ClassifiedFile[], state: MutableState, tracker: ReadTracker): Promise<void> {
+  const selected = new Map<string, ArcItemSelection>();
+
   for (const file of files) {
     try {
       const data = asObject(await tracker.readJson(file));
-      const items = arrayValue(data?.timelineItems);
-      items.sort((lhs, rhs) => (parseImportTimestamp(stringValue(lhs.startDate)) ?? 0) - (parseImportTimestamp(stringValue(rhs.startDate)) ?? 0));
+      for (const item of arrayValue(data?.timelineItems)) {
+        const key = arcItemKey(item);
+        if (!key) {
+          continue;
+        }
+        const score = arcItemScore(item);
+        const current = selected.get(key);
+        if (!current || compareArcItemScores(score, current.score) > 0) {
+          selected.set(key, { path: file.path, score });
+        }
+      }
+    } catch (error) {
+      recordDiagnostic(state, `Failed to index ${file.path}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  const imported = new Set<string>();
+  for (const file of files) {
+    try {
+      const data = asObject(await tracker.readJson(file));
+      const items = arrayValue(data?.timelineItems)
+        .filter((item) => {
+          const key = arcItemKey(item);
+          return key !== null && !imported.has(key) && selected.get(key)?.path === file.path;
+        })
+        .sort((lhs, rhs) => (parseImportTimestamp(stringValue(lhs.startDate)) ?? 0) - (parseImportTimestamp(stringValue(rhs.startDate)) ?? 0));
       for (const item of items) {
+        const key = arcItemKey(item);
+        if (!key) {
+          continue;
+        }
+        imported.add(key);
         importArcTimelineItem(item, state, "arc_import");
       }
     } catch (error) {
@@ -262,11 +390,55 @@ async function importArcExport(entries: ImportFileHandle[], state: MutableState,
   }
 }
 
-async function importArcBackup(entries: ImportFileHandle[], state: MutableState, tracker: ReadTracker): Promise<void> {
-  const backupEntries = entries.filter((entry) => isJsonPath(entry.path) && isArcBackupPath(normalizePath(entry.path)));
-  const placeFiles = backupEntries.filter((entry) => normalizePath(entry.path).includes("/Place/"));
-  const itemFiles = backupEntries.filter((entry) => normalizePath(entry.path).includes("/TimelineItem/"));
-  const sampleFiles = backupEntries.filter((entry) => normalizePath(entry.path).includes("/LocomotionSample/"));
+function arcItemKey(item: JsonObject): string | null {
+  const itemId = stringValue(item.itemId);
+  if (itemId) {
+    return `id:${itemId}`;
+  }
+  const start = stringValue(item.startDate);
+  const end = stringValue(item.endDate);
+  if (!start || !end) {
+    return null;
+  }
+  return `time:${start}|${end}|${item.isVisit === true ? "stay" : "move"}`;
+}
+
+function arcItemScore(item: JsonObject): ArcItemSelection["score"] {
+  const samples = arrayValue(item.samples);
+  const sampleFields = samples.reduce((count, sample) => count + Object.values(sample).filter((value) => value !== null && value !== undefined).length, 0);
+  const place = asObject(item.place);
+  return [
+    samples.length,
+    sampleFields,
+    Object.values(item).filter((value) => value !== null && value !== undefined).length,
+    place ? Object.values(place).filter((value) => value !== null && value !== undefined).length : 0
+  ];
+}
+
+function compareArcItemScores(lhs: ArcItemSelection["score"], rhs: ArcItemSelection["score"]): number {
+  for (let index = 0; index < lhs.length; index += 1) {
+    if (lhs[index] !== rhs[index]) {
+      return lhs[index]! - rhs[index]!;
+    }
+  }
+  return 0;
+}
+
+async function importArcBackup(files: ClassifiedFile[], state: MutableState, tracker: ReadTracker): Promise<void> {
+  const placeFiles: ClassifiedFile[] = [];
+  const itemFiles: ClassifiedFile[] = [];
+  const sampleFiles: ClassifiedFile[] = [];
+
+  for (const file of files) {
+    const object = asObject(file.json);
+    if (object && stringValue(object.itemId) !== null) {
+      itemFiles.push(file);
+    } else if (object && stringValue(object.placeId) !== null) {
+      placeFiles.push(file);
+    } else if (Array.isArray(file.json) && arrayValue(file.json).some((sample) => stringValue(sample.sampleId) !== null && stringValue(sample.timelineItemId) !== null)) {
+      sampleFiles.push(file);
+    }
+  }
 
   for (const file of placeFiles) {
     try {
@@ -300,8 +472,7 @@ async function importArcBackup(entries: ImportFileHandle[], state: MutableState,
   }
 }
 
-async function importMovesExport(entries: ImportFileHandle[], state: MutableState, tracker: ReadTracker): Promise<void> {
-  const files = entries.filter((entry) => isJsonPath(entry.path) && isMovesExportPath(normalizePath(entry.path)));
+async function importMovesExport(files: ClassifiedFile[], state: MutableState, tracker: ReadTracker): Promise<void> {
   for (const file of files) {
     try {
       const data = await tracker.readJson(file);
@@ -318,16 +489,23 @@ async function importMovesExport(entries: ImportFileHandle[], state: MutableStat
 function importArcTimelineItem(item: JsonObject, state: MutableState, provider: string): void {
   const samples = arrayValue(item.samples);
   const tzOffset = numberValue(samples[0]?.secondsFromGMT);
+  const itemId = stringValue(item.itemId);
   if (item.isVisit === true) {
-    importArcStay(item, state, tzOffset, provider);
+    const stayId = importArcStay(item, state, tzOffset);
+    if (itemId && stayId !== null) {
+      state.itemMap.set(itemId, { kind: "stay", id: stayId });
+    }
   } else {
-    importArcMove(item, state, tzOffset, provider);
+    const moveId = importArcMove(item, state, tzOffset, provider);
+    if (itemId && moveId !== null) {
+      state.itemMap.set(itemId, { kind: "move", id: moveId });
+    }
   }
   importSamples(samples, state);
   importPedometerData(item, state, tzOffset);
 }
 
-function importArcStay(item: JsonObject, state: MutableState, tzOffset: number | null, provider: string): number | null {
+function importArcStay(item: JsonObject, state: MutableState, tzOffset: number | null): number | null {
   const start = parseImportTimestamp(stringValue(item.startDate));
   const end = parseImportTimestamp(stringValue(item.endDate));
   if (start === null || end === null || !validWindow(start, end)) {
@@ -426,15 +604,20 @@ function importArcPlace(place: JsonObject, state: MutableState): number | null {
     return null;
   }
 
-  const radius = asObject(place.radius);
+  const radius = positiveNumber(numberValue(asObject(place.radius)?.mean));
+  state.arcPlaces.set(placeId, { center, radius });
+  const name = meaningfulName(place.name);
+  if (!name) {
+    return null;
+  }
   return insertPoi(state, {
     provider: "arc",
     providerId: placeId,
-    name: stringValue(place.name) ?? "Unknown Place",
+    name,
     category: stringValue(place.mapboxCategory),
     lat: center.lat,
     lon: center.lon,
-    radius: positiveNumber(numberValue(radius?.mean)),
+    radius,
     seenTs: null,
     thoroughfare: stringValue(place.streetAddress)
   });
@@ -449,11 +632,17 @@ function importArcBackupTimelineItem(item: JsonObject, state: MutableState): voi
     return;
   }
 
+  if (state.itemMap.has(itemId)) {
+    importPedometerData(item, state, tzOffset);
+    return;
+  }
+
   if (item.isVisit === true) {
     const placeId = stringValue(item.placeId);
     const poiId = placeId ? state.poiCache.get(`arc:${placeId}`) ?? null : null;
     const poi = poiId ? state.rows.pois.find((row) => row.id === poiId) ?? null : null;
-    const center = poi ? { lat: poi.lat, lon: poi.lon } : locationFrom(item.center);
+    const place = placeId ? state.arcPlaces.get(placeId) : null;
+    const center = poi ? { lat: poi.lat, lon: poi.lon } : place?.center ?? locationFrom(item.center);
     if (!center) {
       recordDiagnostic(state, "Skipped backup stay without coordinates");
       return;
@@ -464,7 +653,7 @@ function importArcBackupTimelineItem(item: JsonObject, state: MutableState): voi
       end_ts: end,
       centroid_lat: center.lat,
       centroid_lon: center.lon,
-      radius_m: poi?.radius_m ?? 50,
+      radius_m: poi?.radius_m ?? place?.radius ?? 50,
       type: "venue",
       poi_id: poiId,
       tz_offset_s: tzOffset
@@ -522,12 +711,41 @@ function importArcBackupSamples(samples: JsonObject[], state: MutableState): voi
 }
 
 function importMovesDay(day: JsonObject, state: MutableState): void {
-  for (const segment of arrayValue(day.segments)) {
+  const segments = arrayValue(day.segments);
+  const starts = segments.map((segment) => parseImportTimestamp(stringValue(segment.startTime))).filter((value): value is number => value !== null);
+  const ends = segments.map((segment) => parseImportTimestamp(stringValue(segment.endTime))).filter((value): value is number => value !== null);
+  if (starts.length > 0 && ends.length > 0) {
+    replaceSemanticEventsInRange(state, Math.min(...starts) - 1, Math.max(...ends) + 1);
+  }
+  for (const segment of segments) {
     const type = stringValue(segment.type);
     if (type === "place") {
       importMovesPlace(segment, state);
     } else if (type === "move") {
       importMovesMove(segment, state);
+    }
+  }
+}
+
+function replaceSemanticEventsInRange(state: MutableState, start: number, end: number): void {
+  const removedStayIds = new Set(state.rows.stays.filter((row) => row.start_ts < end && (row.end_ts === null || row.end_ts > start)).map((row) => row.id));
+  const removedMoveIds = new Set(state.rows.moves.filter((row) => row.start_ts < end && (row.end_ts === null || row.end_ts > start)).map((row) => row.id));
+  state.rows.stays = state.rows.stays.filter((row) => !removedStayIds.has(row.id));
+  state.rows.moves = state.rows.moves.filter((row) => !removedMoveIds.has(row.id));
+  state.rows.no_data_gaps = state.rows.no_data_gaps.filter((row) => row.start_ts >= end || (row.end_ts !== null && row.end_ts <= start));
+  state.rows.stay_pois = state.rows.stay_pois.filter((row) => !removedStayIds.has(row.stay_id));
+  state.rows.route_paths = state.rows.route_paths.filter((row) => !removedMoveIds.has(row.move_id));
+  for (const [placeId, pending] of state.pendingMovesStays) {
+    const remaining = pending.filter((stay) => !removedStayIds.has(stay.id));
+    if (remaining.length > 0) {
+      state.pendingMovesStays.set(placeId, remaining);
+    } else {
+      state.pendingMovesStays.delete(placeId);
+    }
+  }
+  for (const [itemId, mapping] of state.itemMap) {
+    if ((mapping.kind === "stay" && removedStayIds.has(mapping.id)) || (mapping.kind === "move" && removedMoveIds.has(mapping.id))) {
+      state.itemMap.delete(itemId);
     }
   }
 }
@@ -542,17 +760,8 @@ function importMovesPlace(segment: JsonObject, state: MutableState): void {
   }
 
   const movesPlaceId = stringValue(place.id) ?? numberValue(place.id)?.toString() ?? null;
-  const poiId = movesPlaceId ? insertPoi(state, {
-    provider: "moves",
-    providerId: movesPlaceId,
-    name: stringValue(place.name) ?? "Moves Place",
-    category: null,
-    lat: center.lat,
-    lon: center.lon,
-    radius: null,
-    seenTs: start,
-    thoroughfare: null
-  }) : null;
+  const name = meaningfulName(place.name);
+  const poiId = movesPlaceId ? resolveMovesPoi(state, movesPlaceId, name, center, start) : null;
 
   const stay: StayRow = {
     id: state.next.stays++,
@@ -568,7 +777,58 @@ function importMovesPlace(segment: JsonObject, state: MutableState): void {
   state.rows.stays.push(stay);
   if (poiId !== null) {
     state.rows.stay_pois.push({ stay_id: stay.id, poi_id: poiId, role: "primary", distance_m: null });
+  } else if (movesPlaceId) {
+    const pending = state.pendingMovesStays.get(movesPlaceId) ?? [];
+    pending.push(stay);
+    state.pendingMovesStays.set(movesPlaceId, pending);
   }
+}
+
+function meaningfulName(value: unknown): string | null {
+  const name = stringValue(value)?.trim();
+  return name && name.length > 0 ? name : null;
+}
+
+function resolveMovesPoi(state: MutableState, placeId: string, name: string | null, center: { lat: number; lon: number }, seenTs: number): number | null {
+  const cacheKey = `moves:${placeId}`;
+  const existingId = state.poiCache.get(cacheKey);
+  if (!name) {
+    if (!existingId) {
+      return null;
+    }
+    const existing = state.rows.pois.find((row) => row.id === existingId);
+    if (existing) {
+      existing.visitCount += 1;
+      existing.last_seen_ts = seenTs;
+    }
+    return existingId;
+  }
+
+  const poiId = insertPoi(state, {
+    provider: "moves",
+    providerId: placeId,
+    name,
+    category: null,
+    lat: center.lat,
+    lon: center.lon,
+    radius: null,
+    seenTs,
+    thoroughfare: null
+  });
+  const pending = state.pendingMovesStays.get(placeId) ?? [];
+  if (pending.length > 0) {
+    const poi = state.rows.pois.find((row) => row.id === poiId);
+    if (poi) {
+      poi.visitCount += pending.length;
+      poi.first_seen_ts = Math.min(poi.first_seen_ts ?? seenTs, ...pending.map((stay) => stay.start_ts));
+    }
+    for (const stay of pending) {
+      stay.poi_id = poiId;
+      state.rows.stay_pois.push({ stay_id: stay.id, poi_id: poiId, role: "primary", distance_m: null });
+    }
+    state.pendingMovesStays.delete(placeId);
+  }
+  return poiId;
 }
 
 function importMovesMove(segment: JsonObject, state: MutableState): void {
@@ -661,7 +921,7 @@ function insertPoi(
     id: state.next.pois++,
     provider: input.provider,
     provider_poi_id: input.providerId,
-    name: input.name.trim() || "Unknown Place",
+    name: input.name.trim(),
     category: input.category,
     subcategory: null,
     lat: input.lat,
@@ -772,6 +1032,9 @@ function insertRoutePath(state: MutableState, moveId: number, coords: Array<[num
 }
 
 function importSamples(samples: JsonObject[], state: MutableState): void {
+  const rawGPSRows: RawGPSRow[] = [];
+  const sampleRows: SampleRow[] = [];
+  const motionRows: RawMotionActivityRow[] = [];
   for (const sample of samples) {
     const location = asObject(sample.location) ?? sample;
     const point = locationFrom(location);
@@ -803,7 +1066,7 @@ function importSamples(samples: JsonObject[], state: MutableState): void {
       provider: "unknown",
       is_simulated: 0
     };
-    state.rows.raw_gps.push(rawGPS);
+    rawGPSRows.push(rawGPS);
 
     const sampleRow: SampleRow = {
       id: state.next.samples++,
@@ -823,18 +1086,21 @@ function importSamples(samples: JsonObject[], state: MutableState): void {
       step_delta: null,
       tz_offset_s: tzOffset
     };
-    state.rows.samples.push(sampleRow);
+    sampleRows.push(sampleRow);
 
     const activity = stringValue(sample.coreMotionActivityType) ?? stringValue(sample.confirmedType);
     if (activity) {
-      insertMotionActivity(state, ts, activity, tzOffset);
+      motionRows.push(makeMotionActivityRow(state, ts, activity, tzOffset));
     }
   }
+  emitRows(state, "raw_gps", rawGPSRows);
+  emitRows(state, "samples", sampleRows);
+  emitRows(state, "raw_motion_activity", motionRows);
 }
 
-function insertMotionActivity(state: MutableState, ts: number, activity: string, tzOffset: number | null): void {
+function makeMotionActivityRow(state: MutableState, ts: number, activity: string, tzOffset: number | null): RawMotionActivityRow {
   const key = activity.trim().toLowerCase();
-  const row: RawMotionActivityRow = {
+  return {
     id: state.next.raw_motion_activity++,
     ts,
     confidence: 2,
@@ -847,7 +1113,6 @@ function insertMotionActivity(state: MutableState, ts: number, activity: string,
     is_unknown: key === "unknown" ? 1 : 0,
     tz_offset_s: tzOffset
   };
-  state.rows.raw_motion_activity.push(row);
 }
 
 function importPedometerData(item: JsonObject, state: MutableState, tzOffset: number | null): void {
@@ -875,7 +1140,25 @@ function importPedometerData(item: JsonObject, state: MutableState, tzOffset: nu
     floors_down: floorsDown,
     tz_offset_s: tzOffset
   };
-  state.rows.raw_pedometer.push(row);
+  emitRows(state, "raw_pedometer", [row]);
+}
+
+function emitRows<T extends StreamableAuraTable>(state: MutableState, table: T, rows: StreamableAuraRows[T]): void {
+  if (rows.length === 0) {
+    return;
+  }
+  if (state.onRows) {
+    state.onRows(table, rows);
+    state.streamedCounts[table] += rows.length;
+  } else if (table === "raw_gps") {
+    state.rows.raw_gps.push(...rows as RawGPSRow[]);
+  } else if (table === "samples") {
+    state.rows.samples.push(...rows as SampleRow[]);
+  } else if (table === "raw_motion_activity") {
+    state.rows.raw_motion_activity.push(...rows as RawMotionActivityRow[]);
+  } else {
+    state.rows.raw_pedometer.push(...rows as RawPedometerRow[]);
+  }
 }
 
 function coordinatesFromSamples(samples: JsonObject[]): Array<[number, number]> {
@@ -939,8 +1222,7 @@ function makeNormalizationContext(): NormalizationContext {
     removedStayIds: new Set(),
     removedMoveIds: new Set(),
     removedGapIds: new Set(),
-    stayRedirects: new Map(),
-    moveRedirects: new Map()
+    stayRedirects: new Map()
   };
 }
 
@@ -1045,14 +1327,6 @@ function mergeSemanticRows(state: MutableState, context: NormalizationContext, t
     context.stayRedirects.set(source.row.id, target.row.id);
   } else if (target.kind === "gap" && source.kind === "gap") {
     context.removedGapIds.add(source.row.id);
-  } else if (target.kind === "move" && source.kind === "move") {
-    const targetMove = target.row as MoveRow;
-    const sourceMove = source.row as MoveRow;
-    targetMove.distance_m = targetMove.distance_m !== null && sourceMove.distance_m !== null
-      ? targetMove.distance_m + sourceMove.distance_m
-      : targetMove.distance_m ?? sourceMove.distance_m;
-    context.removedMoveIds.add(sourceMove.id);
-    context.moveRedirects.set(sourceMove.id, targetMove.id);
   }
   recordDiagnostic(state, `Merged adjacent ${target.kind} events`);
 }
@@ -1060,9 +1334,6 @@ function mergeSemanticRows(state: MutableState, context: NormalizationContext, t
 function canMergeSemanticRows(lhs: SemanticRef, rhs: SemanticRef): boolean {
   if (lhs.kind !== rhs.kind) {
     return false;
-  }
-  if (lhs.kind === "move" && rhs.kind === "move") {
-    return (lhs.row as MoveRow).mode === (rhs.row as MoveRow).mode;
   }
   return lhs.kind === "stay" || lhs.kind === "gap";
 }
@@ -1126,16 +1397,14 @@ function applyNormalizationContext(state: MutableState, context: NormalizationCo
   const primaryMoveIds = new Set<number>();
   const routePaths: RoutePathRow[] = [];
   for (const row of state.rows.route_paths) {
-    const moveId = redirectedId(context.moveRedirects, row.move_id);
-    if (!validMoveIds.has(moveId)) {
+    if (!validMoveIds.has(row.move_id)) {
       continue;
     }
-    row.move_id = moveId;
     if (row.is_primary === 1) {
-      if (primaryMoveIds.has(moveId)) {
+      if (primaryMoveIds.has(row.move_id)) {
         row.is_primary = 0;
       } else {
-        primaryMoveIds.add(moveId);
+        primaryMoveIds.add(row.move_id);
       }
     }
     routePaths.push(row);
@@ -1193,7 +1462,7 @@ function makeReport(
   onProgress?: (progress: ImportProgress) => void
 ): ImportReport {
   const counts = Object.fromEntries(
-    Object.entries(state.rows).map(([key, rows]) => [key, rows.length])
+    Object.entries(state.rows).map(([key, rows]) => [key, rows.length + (key in state.streamedCounts ? state.streamedCounts[key as StreamableAuraTable] : 0)])
   ) as Record<keyof AuraRows, number>;
   const semanticCount = state.rows.stays.length + state.rows.moves.length + state.rows.no_data_gaps.length;
   reportProgress(onProgress, "report", "Summarizing timeline report", 0, semanticCount);

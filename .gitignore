@@ -5,3 +5,5 @@ dist-ts/
 .DS_Store
 .env
 .vite/
+
+.wrangler/

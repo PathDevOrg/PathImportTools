@@ -8,10 +8,7 @@
       "path": "./packages/converter"
     },
     {
-      "path": "./packages/fixtures"
-    },
-    {
-      "path": "./apps/web"
+      "path": "./web"
     }
   ]
 }
