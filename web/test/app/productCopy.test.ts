@@ -3,10 +3,10 @@ import { describe, expect, test } from "vitest";
 import { productCopy } from "../../src/app/productCopy";
 
 describe("productCopy", () => {
-  test("uses Path as the visible product name", () => {
+  test("shows Path as the visible product name", () => {
     const visibleText = JSON.stringify(productCopy);
 
-    expect(productCopy.productName).toBe("Path");
+    expect(productCopy.appName).toBe("Path Import");
     expect(productCopy.downloadAppLabel).toBe("Download on the App Store");
     expect(visibleText).not.toContain("Aura");
   });

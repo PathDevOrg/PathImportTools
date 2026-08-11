@@ -86,18 +86,23 @@ async function runMovesOnlyDirectoryCheck() {
     window.showDirectoryPicker = async () => ({
       kind: "directory",
       name: "moves-export-only-dir",
-      getFileHandle: async (n) => ({
-        kind: "file",
-        name: n,
-        getFile: async () => new File([contentBytes], n, { type: "application/json" }),
-        createWritable: async () => {
-          const chunks = [];
-          return {
-            write: async (chunk) => { chunks.push(chunk); },
-            close: async () => { window.__writtenChunks = chunks; }
-          };
+      getFileHandle: async (n, options) => {
+        if (!options?.create) {
+          throw new DOMException("File not found", "NotFoundError");
         }
-      }),
+        return {
+          kind: "file",
+          name: n,
+          getFile: async () => new File([contentBytes], n, { type: "application/json" }),
+          createWritable: async () => {
+            const chunks = [];
+            return {
+              write: async (chunk) => { chunks.push(chunk); },
+              close: async () => { window.__writtenChunks = chunks; }
+            };
+          }
+        };
+      },
       entries: async function* () {
         yield ["json", {
           kind: "directory",

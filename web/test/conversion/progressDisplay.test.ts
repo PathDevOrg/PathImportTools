@@ -2,14 +2,12 @@ import { describe, expect, test } from "vitest";
 import { progressDetailText, progressPercent } from "../../src/conversion/progressDisplay";
 
 describe("progressDetailText", () => {
-  test("shows item counts even when byte progress is available", () => {
+  test("shows item counts", () => {
     expect(progressDetailText({
       phase: "parse",
       message: "Reading file",
       completed: 1234,
-      total: 18414,
-      bytesCompleted: 348_900_000,
-      bytesTotal: 1_600_000_000
+      total: 18414
     })).toBe("1,234 / 18,414");
   });
 });

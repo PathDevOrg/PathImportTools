@@ -27,6 +27,7 @@ export type ImportFileHandle = {
   path: string;
   size: number;
   readData: () => Promise<Uint8Array>;
+  readChunks?: () => AsyncIterable<Uint8Array>;
 };
 
 export type ImportProgressPhase = "scan" | "read" | "parse" | "normalize" | "report";
@@ -100,7 +101,7 @@ export type RoutePathRow = {
   quantization_cm: number;
   path_blob: Uint8Array;
   sample_count: number;
-  path_quality: "raw";
+  path_quality: "raw" | "filtered";
   provider: string;
   bbox_min_lat: number;
   bbox_min_lon: number;
@@ -184,7 +185,7 @@ export type RawVisitRow = {
 export type StayPoiRow = {
   stay_id: number;
   poi_id: number;
-  role: "primary";
+  role: "primary" | "secondary" | "inferred" | null;
   distance_m: number | null;
 };
 
@@ -218,6 +219,17 @@ export type ImportReport = {
   dateRange: { startTs: number; endTs: number } | null;
   counts: Record<keyof AuraRows, number>;
   diagnostics: string[];
+  timelineIntegrity: TimelineIntegritySummary;
+};
+
+export type TimelineIntegritySummary = {
+  eventCount: number;
+  duplicateStartCount: number;
+  overlapCount: number;
+  adjacentSameKindCount: number;
+  openEventCount: number;
+  openEventNotLastCount: number;
+  nonPositiveDurationCount: number;
 };
 
 export type StreamableAuraTable = "raw_gps" | "samples" | "raw_motion_activity" | "raw_pedometer";

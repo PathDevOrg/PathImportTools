@@ -7,6 +7,7 @@ export type DownloadState = {
   url: string | null;
   filename: string;
   savedToDisk: boolean;
+  diagnostics: string[];
 };
 
 export function EmptyState({ onSelect }: { onSelect: () => void }) {
@@ -43,6 +44,17 @@ export function CompleteState({ download, onSelect }: { download: DownloadState;
       </div>
       <h2>{productCopy.completeTitle}</h2>
       <p className="stage-copy">{download.savedToDisk ? productCopy.completeSavedBody : productCopy.completeDownloadBody}</p>
+      {download.diagnostics.length > 0 ? (
+        <div className="conversion-warnings" role="status">
+          <div>
+            <TriangleAlert size={18} />
+            <strong>{download.diagnostics.length} data warning{download.diagnostics.length === 1 ? "" : "s"}</strong>
+          </div>
+          <ul>
+            {download.diagnostics.slice(0, 3).map((diagnostic) => <li key={diagnostic}>{diagnostic}</li>)}
+          </ul>
+        </div>
+      ) : null}
       <div className="secondary-actions">
         {download.url ? (
           <a className="secondary-button" href={download.url} download={download.filename}>

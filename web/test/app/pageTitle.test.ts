@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { makeImportFilename } from "../../src/conversion/outputFilename";
+import { makeImportFilename, makeUniqueImportFilename } from "../../src/conversion/outputFilename";
 import { pageTitle } from "../../src/app/pageTitle";
 
 describe("pageTitle", () => {
@@ -25,6 +25,20 @@ describe("pageTitle", () => {
 
 describe("makeImportFilename", () => {
   test("formats the timestamp used by save picker and worker output", () => {
-    expect(makeImportFilename(new Date(2026, 4, 14, 9, 7))).toBe("path-import-20260514-0907.db");
+    expect(makeImportFilename(new Date(2026, 4, 14, 9, 7, 6))).toBe("path-import-20260514-090706.db");
+  });
+
+  test("adds a suffix instead of overwriting an existing directory export", async () => {
+    const existing = new Set(["path-import.db", "path-import-2.db"]);
+    const directory = {
+      getFileHandle: async (name: string) => {
+        if (!existing.has(name)) {
+          throw new DOMException("missing", "NotFoundError");
+        }
+        return { name };
+      }
+    } as FileSystemDirectoryHandle;
+
+    await expect(makeUniqueImportFilename(directory, "path-import.db")).resolves.toBe("path-import-3.db");
   });
 });

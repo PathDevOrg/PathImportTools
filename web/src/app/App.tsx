@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { CompleteState, EmptyState, ErrorState, PrivacyFooter, WorkingState, type DownloadState } from "../components/ImportStages";
 import { pickDirectoryFiles, type DirectoryPickerHost, type PickedDirectoryFile } from "../conversion/directoryPicker";
-import { makeImportFilename } from "../conversion/outputFilename";
+import { makeImportFilename, makeUniqueImportFilename } from "../conversion/outputFilename";
 import { makeWorkerOutputTarget, type SaveFilePickerHost } from "../conversion/outputTarget";
 import { progressPercent } from "../conversion/progressDisplay";
 import type { WorkerFilePayload, WorkerOutputTarget, WorkerProgress, WorkerRequest, WorkerResponse } from "../conversion/workerTypes";
@@ -18,6 +18,7 @@ export function App() {
   const activeRequestRef = useRef<string | null>(null);
   const filesRef = useRef<SelectedFile[]>([]);
   const downloadUrlRef = useRef<string | null>(null);
+  const outputTokenRef = useRef<string | null>(null);
   const autoDownloadedUrlRef = useRef<string | null>(null);
   const outputDirectoryRef = useRef<FileSystemDirectoryHandle | null>(null);
   const outputFilenameRef = useRef<string | null>(null);
@@ -49,13 +50,21 @@ export function App() {
       } else if (response.type === "scan-complete") {
         void handleScanComplete(response.id, response.scan.supportedFileCount);
       } else if (response.type === "convert-complete") {
-        const url = response.bytes ? URL.createObjectURL(new Blob([arrayBufferForBlob(response.bytes)], { type: "application/vnd.sqlite3" })) : null;
+        const url = response.file
+          ? URL.createObjectURL(response.file)
+          : response.bytes
+            ? URL.createObjectURL(new Blob([arrayBufferForBlob(response.bytes)], { type: "application/vnd.sqlite3" }))
+            : null;
         if (downloadUrlRef.current) {
-          URL.revokeObjectURL(downloadUrlRef.current);
+          revokeAfterDownloadHandoff(downloadUrlRef.current);
+        }
+        if (outputTokenRef.current) {
+          worker.postMessage({ id: crypto.randomUUID(), type: "release-output", outputToken: outputTokenRef.current } satisfies WorkerRequest);
         }
         downloadUrlRef.current = url;
+        outputTokenRef.current = response.outputToken ?? null;
         autoDownloadedUrlRef.current = null;
-        setDownload({ url, filename: response.filename, savedToDisk: response.savedToDisk });
+        setDownload({ url, filename: response.filename, savedToDisk: response.savedToDisk, diagnostics: response.diagnostics });
         setStage("complete");
         setProgressDetail({
           phase: "export",
@@ -109,7 +118,13 @@ export function App() {
     try {
       const outputDirectory = outputDirectoryRef.current;
       const outputFilename = outputFilenameRef.current ?? makeImportFilename();
-      const output = outputDirectory ? await makeDirectoryOutputTarget(outputDirectory, outputFilename) : shouldAskForSaveLocationRef.current ? await makeWorkerOutputTarget(window as SaveFilePickerHost, outputFilename) : { filename: outputFilename };
+      const selectedOutput = outputDirectory ? await makeDirectoryOutputTarget(outputDirectory, outputFilename) : shouldAskForSaveLocationRef.current ? await makeWorkerOutputTarget(window as SaveFilePickerHost, outputFilename) : { filename: outputFilename };
+      const storage = (navigator as Navigator & {
+        storage?: { getDirectory?: unknown };
+      }).storage;
+      const output = selectedOutput && !selectedOutput.saveHandle && typeof storage?.getDirectory === "function"
+        ? { ...selectedOutput, opfsDownload: true }
+        : selectedOutput;
       if (activeRequestRef.current !== requestId) {
         return;
       }
@@ -165,8 +180,12 @@ export function App() {
     setErrorTitle(null);
     setProgressDetail(null);
     if (downloadUrlRef.current) {
-      URL.revokeObjectURL(downloadUrlRef.current);
+      revokeAfterDownloadHandoff(downloadUrlRef.current);
       downloadUrlRef.current = null;
+    }
+    if (outputTokenRef.current && workerRef.current) {
+      workerRef.current.postMessage({ id: crypto.randomUUID(), type: "release-output", outputToken: outputTokenRef.current } satisfies WorkerRequest);
+      outputTokenRef.current = null;
     }
     autoDownloadedUrlRef.current = null;
     setDownload(null);
@@ -180,7 +199,7 @@ export function App() {
     sendToWorker("scan", nextFiles);
   }
 
-  function sendToWorker(type: WorkerRequest["type"], selectedFiles: SelectedFile[], output?: WorkerOutputTarget) {
+  function sendToWorker(type: "scan" | "convert", selectedFiles: SelectedFile[], output?: WorkerOutputTarget) {
     const worker = workerRef.current;
     if (!worker || selectedFiles.length === 0) {
       return;
@@ -239,8 +258,9 @@ export function App() {
 }
 
 async function makeDirectoryOutputTarget(directory: FileSystemDirectoryHandle, filename: string): Promise<WorkerOutputTarget> {
-  const saveHandle = await directory.getFileHandle(filename, { create: true });
-  return { filename: saveHandle.name || filename, saveHandle };
+  const uniqueFilename = await makeUniqueImportFilename(directory, filename);
+  const saveHandle = await directory.getFileHandle(uniqueFilename, { create: true });
+  return { filename: saveHandle.name || uniqueFilename, saveHandle };
 }
 
 function arrayBufferForBlob(bytes: Uint8Array): ArrayBuffer {
@@ -248,4 +268,8 @@ function arrayBufferForBlob(bytes: Uint8Array): ArrayBuffer {
     return bytes.buffer as ArrayBuffer;
   }
   return bytes.slice().buffer as ArrayBuffer;
+}
+
+function revokeAfterDownloadHandoff(url: string): void {
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }

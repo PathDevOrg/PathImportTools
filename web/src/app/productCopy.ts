@@ -1,5 +1,4 @@
 export const productCopy = {
-  productName: "Path",
   appName: "Path Import",
   downloadAppLabel: "Download on the App Store",
   appDownloadHref: "https://apps.apple.com/app/id6758724528",

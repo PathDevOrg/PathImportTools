@@ -4,11 +4,11 @@ Path Import converts Arc and Moves timeline backups into a Path import database.
 
 ## What it supports
 
-- Arc `Export/JSON`
-- Arc `Previous Backups`
-- Moves `moves_export/json/daily/storyline`
+- Arc exports and partial `Previous Backups` folders
+- Moves storyline, activities, places, and summary exports at daily, monthly, yearly, or full-history scope
+- Mixed or reorganized folders whose supported files are no longer in their original paths
 - Writable folder selection on browsers with File System Access
-- Directory input and zip fallbacks for cross-platform use
+- Directory input and zip fallbacks, with OPFS-backed downloads when available
 
 ## Development
 
@@ -26,7 +26,11 @@ npm run dev
 
 The selected files are read by a browser Worker. Conversion uses SQLite WASM and OPFS when available. No server upload, account, telemetry, or external API call is part of the conversion path.
 
-Folder imports are indexed from browser `File` handles and each supported JSON file is read on demand. On browsers with File System Access, the output database is streamed to a file in the selected folder. Zip imports are indexed from the central directory and each supported entry is sliced and decompressed on demand, avoiding full-archive unzip in memory.
+Folder imports are indexed from browser `File` handles and each supported JSON file is read on demand. When the browser provides writable user-selected folder or file handles, the output database is streamed directly to that destination. Zip imports are indexed from the central directory and each supported entry is sliced and decompressed on demand, avoiding full-archive unzip in memory.
+
+Large multi-year archives use either direct file saving or an OPFS-backed download, subject to the browser's local-storage quota. Browsers that provide neither path can still convert smaller archives through the bounded in-memory fallback.
+
+An OPFS-backed download keeps its source file in the site's local storage for up to 24 hours so the browser can finish reading it safely. A later conversion removes expired files; clearing this site's data removes them immediately.
 
 
 ## License

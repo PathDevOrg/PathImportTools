@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { open } from "node:fs/promises";
 import { chromium } from "playwright";
 import { strToU8, zipSync } from "fflate";
 
@@ -65,7 +66,12 @@ async function runMockedDirectoryCheck() {
     window.showDirectoryPicker = async () => ({
       kind: "directory",
       name: "movesarc",
-      getFileHandle: async (name) => ({ kind: "file", name }),
+      getFileHandle: async (name, options) => {
+        if (name === "storyline.json" || options?.create) {
+          return { kind: "file", name };
+        }
+        throw new DOMException("File not found", "NotFoundError");
+      },
       entries: async function* () {
         yield ["storyline.json", {
           kind: "file",
@@ -94,7 +100,8 @@ async function runMockedDirectoryCheck() {
             filename: request.output.filename,
             size: 3,
             savedToDisk: Boolean(request.output.saveHandle),
-            report: {}
+            report: {},
+            diagnostics: []
           } }), 10);
         }
       }
@@ -171,6 +178,7 @@ async function runActualConversionCheck() {
     input?.removeAttribute("webkitdirectory");
     input?.removeAttribute("directory");
   });
+  const downloadPromise = page.waitForEvent("download", { timeout: 20_000 });
   await page.locator("input[type=file]").setInputFiles({
     name: "arc-export.zip",
     mimeType: "application/zip",
@@ -178,6 +186,33 @@ async function runActualConversionCheck() {
   });
   await page.getByText("Import file ready").waitFor({ timeout: 20_000 });
   await page.getByText("Download again").waitFor({ timeout: 5_000 });
+  const download = await downloadPromise;
+  const downloadedPath = await download.path();
+  if (!downloadedPath) {
+    throw new Error("Browser download did not produce a local file");
+  }
+  const downloadedFile = await open(downloadedPath, "r");
+  const header = Buffer.alloc(16);
+  try {
+    await downloadedFile.read(header, 0, header.length, 0);
+  } finally {
+    await downloadedFile.close();
+  }
+  if (header.toString("utf8") !== "SQLite format 3\u0000") {
+    throw new Error(`Unexpected downloaded database header: ${header.toString("hex")}`);
+  }
+  const retainedOpfsOutputs = await page.evaluate(async () => {
+    const root = await navigator.storage.getDirectory();
+    const output = await root.getDirectoryHandle("aura-importer-output");
+    let count = 0;
+    for await (const _ of output.values()) {
+      count += 1;
+    }
+    return count;
+  });
+  if (retainedOpfsOutputs < 1) {
+    throw new Error("OPFS download source was removed before the browser completed the download");
+  }
   await page.screenshot({ path: "/tmp/path-import-actual-conversion-smoke.png", fullPage: true });
   await browser.close();
 

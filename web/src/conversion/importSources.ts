@@ -1,10 +1,11 @@
-import { inflateSync } from "fflate";
+import { Inflate } from "fflate";
 import type { ImportFileHandle } from "@aura-importer/converter";
 import type { WorkerFilePayload } from "./workerTypes";
 
 type ZipEntry = {
   path: string;
   compression: number;
+  crc32: number;
   compressedSize: number;
   uncompressedSize: number;
   localHeaderOffset: number;
@@ -14,8 +15,6 @@ type BuildProgress = {
   message: string;
   completed: number;
   total: number;
-  bytesCompleted: number;
-  bytesTotal: number;
 };
 
 const textDecoder = new TextDecoder();
@@ -26,49 +25,78 @@ const zip64EndSignature = 0x06064b50;
 const zip64LocatorSignature = 0x07064b50;
 const uint32Max = 0xffffffff;
 const uint16Max = 0xffff;
+const readChunkSize = 256 * 1024;
 
 export async function buildImportHandles(files: WorkerFilePayload[], onProgress?: (progress: BuildProgress) => void): Promise<ImportFileHandle[]> {
   const entries: ImportFileHandle[] = [];
-  const bytesTotal = files.reduce((sum, payload) => sum + payload.file.size, 0);
   let completed = 0;
-  let bytesCompleted = 0;
   for (const payload of files) {
     onProgress?.({
       message: `Indexing ${payload.path}`,
       completed,
-      total: files.length,
-      bytesCompleted,
-      bytesTotal
+      total: files.length
     });
     if (payload.path.toLowerCase().endsWith(".zip")) {
       entries.push(...await indexZipFile(payload.file));
     } else {
+      const size = await estimatedInputSize(payload.path, payload.file);
       entries.push({
         path: payload.path,
-        size: payload.file.size,
-        readData: async () => new Uint8Array(await payload.file.arrayBuffer())
+        size,
+        readData: async () => new Uint8Array(await payload.file.arrayBuffer()),
+        readChunks: () => readBlobChunks(payload.file)
       });
     }
     completed += 1;
-    bytesCompleted += payload.file.size;
     onProgress?.({
       message: `Indexed ${payload.path}`,
       completed,
-      total: files.length,
-      bytesCompleted,
-      bytesTotal
+      total: files.length
     });
   }
   return entries;
 }
 
+async function estimatedInputSize(path: string, file: File): Promise<number> {
+  if (!path.toLowerCase().endsWith(".json.gz") || file.size < 4) {
+    return file.size;
+  }
+  const footer = new Uint8Array(await file.slice(file.size - 4).arrayBuffer());
+  const declaredSize = readU32(footer, 0);
+  return Math.max(declaredSize, file.size * 4);
+}
+
 async function indexZipFile(file: File): Promise<ImportFileHandle[]> {
   const directory = await readCentralDirectory(file);
-  return directory.map((entry) => ({
-    path: entry.path,
-    size: entry.uncompressedSize,
-    readData: async () => readZipEntry(file, entry)
-  }));
+  const handles: ImportFileHandle[] = [];
+  for (const entry of directory) {
+    handles.push({
+      path: entry.path,
+      size: await estimatedZipEntrySize(file, entry),
+      readData: async () => readZipEntry(file, entry),
+      readChunks: () => readZipEntryChunks(file, entry)
+    });
+  }
+  return handles;
+}
+
+async function estimatedZipEntrySize(file: File, entry: ZipEntry): Promise<number> {
+  if (!entry.path.toLowerCase().endsWith(".json.gz") || entry.uncompressedSize < 4) {
+    return entry.uncompressedSize;
+  }
+  let footer = new Uint8Array(0);
+  for await (const chunk of readZipEntryChunks(file, entry)) {
+    const combined = new Uint8Array(Math.min(4, footer.length + chunk.length));
+    const tailStart = Math.max(0, chunk.length - combined.length);
+    const retainedFromFooter = combined.length - (chunk.length - tailStart);
+    if (retainedFromFooter > 0) {
+      combined.set(footer.subarray(footer.length - retainedFromFooter), 0);
+    }
+    combined.set(chunk.subarray(tailStart), retainedFromFooter);
+    footer = combined;
+  }
+  const declaredSize = readU32(footer, 0);
+  return Math.max(declaredSize, entry.uncompressedSize * 4);
 }
 
 async function readCentralDirectory(file: File): Promise<ZipEntry[]> {
@@ -92,6 +120,7 @@ async function readCentralDirectory(file: File): Promise<ZipEntry[]> {
       throw new Error("Invalid zip central directory");
     }
     const compression = readU16(centralDirectory, offset + 10);
+    const crc32 = readU32(centralDirectory, offset + 16);
     const compressedSize32 = readU32(centralDirectory, offset + 20);
     const uncompressedSize32 = readU32(centralDirectory, offset + 24);
     const nameLength = readU16(centralDirectory, offset + 28);
@@ -113,7 +142,7 @@ async function readCentralDirectory(file: File): Promise<ZipEntry[]> {
     const localHeaderOffset = zip64Values.localHeaderOffset ?? localHeaderOffset32;
 
     if (path.length > 0 && !path.endsWith("/")) {
-      entries.push({ path, compression, compressedSize, uncompressedSize, localHeaderOffset });
+      entries.push({ path, compression, crc32, compressedSize, uncompressedSize, localHeaderOffset });
     }
     offset = extraEnd + commentLength;
   }
@@ -189,6 +218,22 @@ function parseZip64Extra(
 }
 
 async function readZipEntry(file: File, entry: ZipEntry): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for await (const chunk of readZipEntryChunks(file, entry)) {
+    chunks.push(chunk);
+    size += chunk.byteLength;
+  }
+  const output = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return output;
+}
+
+async function* readZipEntryChunks(file: File, entry: ZipEntry): AsyncGenerator<Uint8Array> {
   const localHeader = new Uint8Array(await file.slice(entry.localHeaderOffset, entry.localHeaderOffset + 30).arrayBuffer());
   if (readU32(localHeader, 0) !== zipLocalHeaderSignature) {
     throw new Error(`Invalid zip local header for ${entry.path}`);
@@ -196,14 +241,83 @@ async function readZipEntry(file: File, entry: ZipEntry): Promise<Uint8Array> {
   const nameLength = readU16(localHeader, 26);
   const extraLength = readU16(localHeader, 28);
   const dataOffset = entry.localHeaderOffset + 30 + nameLength + extraLength;
-  const compressed = new Uint8Array(await file.slice(dataOffset, dataOffset + entry.compressedSize).arrayBuffer());
   if (entry.compression === 0) {
-    return compressed;
+    if (entry.compressedSize !== entry.uncompressedSize) {
+      throw new Error(`Stored zip entry size does not match its directory record: ${entry.path}`);
+    }
+    let produced = 0;
+    let crc = initialCrc32;
+    for await (const chunk of readBlobChunks(file.slice(dataOffset, dataOffset + entry.compressedSize))) {
+      produced += chunk.byteLength;
+      crc = updateCrc32(crc, chunk);
+      yield chunk;
+    }
+    if (produced !== entry.uncompressedSize) {
+      throw new Error(`Zip entry size does not match its directory record: ${entry.path}`);
+    }
+    verifyCrc32(entry, crc);
+    return;
   }
   if (entry.compression === 8) {
-    return inflateSync(compressed, { out: new Uint8Array(entry.uncompressedSize) });
+    const output: Uint8Array[] = [];
+    const inflate = new Inflate((chunk) => {
+      if (chunk.byteLength > 0) {
+        output.push(chunk);
+      }
+    });
+    let produced = 0;
+    let crc = initialCrc32;
+    for (let offset = 0; offset < entry.compressedSize; offset += readChunkSize) {
+      const end = Math.min(entry.compressedSize, offset + readChunkSize);
+      const chunk = new Uint8Array(await file.slice(dataOffset + offset, dataOffset + end).arrayBuffer());
+      inflate.push(chunk, end === entry.compressedSize);
+      while (output.length > 0) {
+        const inflated = output.shift()!;
+        produced += inflated.byteLength;
+        if (produced > entry.uncompressedSize) {
+          throw new Error(`Zip entry expands beyond its declared size: ${entry.path}`);
+        }
+        crc = updateCrc32(crc, inflated);
+        yield inflated;
+      }
+    }
+    if (produced !== entry.uncompressedSize) {
+      throw new Error(`Zip entry size does not match its directory record: ${entry.path}`);
+    }
+    verifyCrc32(entry, crc);
+    return;
   }
   throw new Error(`Unsupported zip compression method ${entry.compression} in ${entry.path}`);
+}
+
+const initialCrc32 = 0xffffffff;
+const crc32Table = Uint32Array.from({ length: 256 }, (_, value) => {
+  let crc = value;
+  for (let bit = 0; bit < 8; bit += 1) {
+    crc = crc & 1 ? 0xedb88320 ^ crc >>> 1 : crc >>> 1;
+  }
+  return crc >>> 0;
+});
+
+function updateCrc32(crc: number, bytes: Uint8Array): number {
+  let current = crc;
+  for (const byte of bytes) {
+    current = crc32Table[(current ^ byte) & 0xff]! ^ current >>> 8;
+  }
+  return current >>> 0;
+}
+
+function verifyCrc32(entry: ZipEntry, crc: number): void {
+  const actual = (crc ^ initialCrc32) >>> 0;
+  if (actual !== entry.crc32) {
+    throw new Error(`Zip entry CRC does not match its directory record: ${entry.path}`);
+  }
+}
+
+async function* readBlobChunks(blob: Blob): AsyncGenerator<Uint8Array> {
+  for (let offset = 0; offset < blob.size; offset += readChunkSize) {
+    yield new Uint8Array(await blob.slice(offset, offset + readChunkSize).arrayBuffer());
+  }
 }
 
 function normalizeZipPath(path: string): string {

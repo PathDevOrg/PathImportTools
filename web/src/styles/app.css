@@ -214,6 +214,28 @@ p {
   font-size: 0.98rem;
 }
 
+.conversion-warnings {
+  width: min(100%, 560px);
+  padding: 14px 16px;
+  border: 1px solid rgba(245, 158, 11, 0.38);
+  border-radius: 14px;
+  color: var(--text-secondary);
+  background: rgba(245, 158, 11, 0.08);
+  text-align: left;
+}
+
+.conversion-warnings > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-primary);
+}
+
+.conversion-warnings ul {
+  margin: 10px 0 0;
+  padding-left: 20px;
+}
+
 .primary-button,
 .secondary-button {
   display: inline-flex;

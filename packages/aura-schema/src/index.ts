@@ -1,22 +1,12 @@
-export type AuraMigrationFile = {
+export type AuraSchemaFile = {
   version: number;
   name: string;
 };
 
-export const migrationFiles: AuraMigrationFile[] = [
-  { version: 1, name: "V1_schema.sql" },
-  { version: 2, name: "V2_timeline_view.sql" },
-  { version: 3, name: "V3_optimization.sql" },
-  { version: 4, name: "V4_device_motion.sql" },
-  { version: 5, name: "V5_refined_tracks.sql" },
-  { version: 6, name: "V6_estimated_quality.sql" },
-  { version: 7, name: "V7_stay_name_rules.sql" },
-  { version: 8, name: "V8_timeline_query_indexes.sql" },
-  { version: 9, name: "V9_move_mode_decisions.sql" }
-];
+export const schemaFile: AuraSchemaFile = { version: 12, name: "V12_schema.sql" };
 
 export function getLatestSchemaVersion(): number {
-  return migrationFiles.reduce((latest, file) => Math.max(latest, file.version), 0);
+  return schemaFile.version;
 }
 
 export function splitSqlStatements(sql: string): string[] {

@@ -1,4 +1,4 @@
-import type { ImportProgressPhase, ImportReport, ImportScan } from "@aura-importer/converter";
+import type { ImportProgressPhase, ImportScan } from "@aura-importer/converter";
 
 export type WorkerFilePayload = {
   path: string;
@@ -8,6 +8,7 @@ export type WorkerFilePayload = {
 export type WorkerOutputTarget = {
   filename: string;
   saveHandle?: FileSystemFileHandle;
+  opfsDownload?: boolean;
 };
 
 export type WorkerRequest =
@@ -21,6 +22,11 @@ export type WorkerRequest =
     type: "convert";
     files: WorkerFilePayload[];
     output: WorkerOutputTarget;
+  }
+  | {
+    id: string;
+    type: "release-output";
+    outputToken: string;
   };
 
 export type WorkerProgress = {
@@ -28,8 +34,6 @@ export type WorkerProgress = {
   message: string;
   completed: number;
   total: number;
-  bytesCompleted?: number;
-  bytesTotal?: number;
 };
 
 export type WorkerResponse =
@@ -47,11 +51,12 @@ export type WorkerResponse =
   | {
     id: string;
     type: "convert-complete";
-    report: ImportReport;
     filename: string;
-    size: number;
     savedToDisk: boolean;
+    diagnostics: string[];
     bytes?: Uint8Array;
+    file?: File;
+    outputToken?: string;
   }
   | {
     id: string;
