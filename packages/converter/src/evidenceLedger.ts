@@ -1,4 +1,4 @@
-import sqlite3InitModule, { type Database, type PreparedStatement, type SAHPoolUtil } from "@sqlite.org/sqlite-wasm";
+import sqlite3InitModule, { type CAPI, type Database, type PreparedStatement, type SAHPoolUtil, type WasmPointer } from "@sqlite.org/sqlite-wasm";
 import { acquireStorageLease, cleanupStaleDirectories } from "./opfsStorage.js";
 
 export type ObservationEvidence = {
@@ -41,7 +41,8 @@ export class EvidenceLedger {
     private readonly insertMovesDay: PreparedStatement,
     private readonly pool: SAHPoolUtil | null,
     private readonly filename: string | null,
-    private readonly releaseStorageLease: () => Promise<void>
+    private readonly releaseStorageLease: () => Promise<void>,
+    private readonly capi: CAPI
   ) {}
 
   static async create(): Promise<EvidenceLedger> {
@@ -213,7 +214,7 @@ export class EvidenceLedger {
         source_path = MIN(moves_day_candidates.source_path, excluded.source_path)
     `);
 
-      return new EvidenceLedger(db, insert, insertTombstone, insertMovesDay, pool, filename, releaseStorageLease);
+      return new EvidenceLedger(db, insert, insertTombstone, insertMovesDay, pool, filename, releaseStorageLease, sqlite3.capi);
     } catch (error) {
       try {
         db.close();
@@ -385,6 +386,8 @@ export class EvidenceLedger {
     try {
       this.db.exec("ROLLBACK TO SAVEPOINT history_file");
       this.db.exec("RELEASE SAVEPOINT history_file");
+    } catch {
+      void 0;
     } finally {
       this.fileSavepointOpen = false;
     }
@@ -502,41 +505,45 @@ export class EvidenceLedger {
 
   firstObservation(timelineItemId: string): Record<string, unknown> | null {
     this.seal();
-    const rows: ObservationRow[] = [];
-    this.db.exec({
-      sql: `${selectObservationsSQL} WHERE timeline_item_id = ? ORDER BY ts, identity LIMIT 1`,
-      bind: [timelineItemId],
-      rowMode: "object",
-      resultRows: rows
-    });
-    return rows[0] ? observationRowToSample(rows[0]) : null;
+    const statement = this.db.prepare(`${selectObservationsSQL} WHERE timeline_item_id = ? ORDER BY ts, identity LIMIT 1`);
+    try {
+      statement.bind([timelineItemId]);
+      const pointer = statementPointer(statement);
+      return this.capi.sqlite3_step(pointer) === this.capi.SQLITE_ROW
+        ? observationRowToSample(observationRowFrom(this.capi, pointer))
+        : null;
+    } finally {
+      statement.finalize();
+    }
   }
 
   observationsForTimelineItem(timelineItemId: string): Record<string, unknown>[] {
     this.seal();
     const samples: Record<string, unknown>[] = [];
-    this.db.exec({
-      sql: `${selectObservationsSQL} WHERE timeline_item_id = ? ORDER BY ts, identity`,
-      bind: [timelineItemId],
-      rowMode: "object",
-      callback: (row) => {
-        samples.push(observationRowToSample(row as ObservationRow));
-      }
-    });
+    const statement = this.db.prepare(`${selectObservationsSQL} WHERE timeline_item_id = ? ORDER BY ts, identity`);
+    try {
+      statement.bind([timelineItemId]);
+      stepRows(statement, this.capi, observationRowFrom, (row) => {
+        samples.push(observationRowToSample(row));
+      });
+    } finally {
+      statement.finalize();
+    }
     return samples;
   }
 
   observationsBetween(start: number, end: number): Record<string, unknown>[] {
     this.seal();
     const samples: Record<string, unknown>[] = [];
-    this.db.exec({
-      sql: `${selectObservationsSQL} WHERE ts >= ? AND ts < ? ORDER BY ts, identity`,
-      bind: [start, end],
-      rowMode: "object",
-      callback: (row) => {
-        samples.push(observationRowToSample(row as ObservationRow));
-      }
-    });
+    const statement = this.db.prepare(`${selectObservationsSQL} WHERE ts >= ? AND ts < ? ORDER BY ts, identity`);
+    try {
+      statement.bind([start, end]);
+      stepRows(statement, this.capi, observationRowFrom, (row) => {
+        samples.push(observationRowToSample(row));
+      });
+    } finally {
+      statement.finalize();
+    }
     return samples;
   }
 
@@ -547,18 +554,18 @@ export class EvidenceLedger {
   ): Record<string, unknown>[] {
     this.seal();
     const samples: Record<string, unknown>[] = [];
-    this.db.exec({
-      sql: `${selectObservationsSQL} WHERE ts >= ? AND ts < ? ORDER BY ts, identity`,
-      bind: [start, end],
-      rowMode: "object",
-      callback: (row) => {
-        const typedRow = row as ObservationRow;
-        const timelineItemId = stringOrNull(typedRow.timeline_item_id);
+    const statement = this.db.prepare(`${selectObservationsSQL} WHERE ts >= ? AND ts < ? ORDER BY ts, identity`);
+    try {
+      statement.bind([start, end]);
+      stepRows(statement, this.capi, observationRowFrom, (row) => {
+        const timelineItemId = stringOrNull(row.timeline_item_id);
         if (timelineItemId === null || !timelineItemId.startsWith("moves:") && !knownTimelineItemIds.has(timelineItemId)) {
-          samples.push(observationRowToSample(typedRow));
+          samples.push(observationRowToSample(row));
         }
-      }
-    });
+      });
+    } finally {
+      statement.finalize();
+    }
     return samples;
   }
 
@@ -586,30 +593,31 @@ export class EvidenceLedger {
       sampleCount = 0;
     };
 
-    this.db.exec({
-      sql: "SELECT ts, timeline_item_id FROM observations ORDER BY ts, identity",
-      rowMode: "object",
-      callback: (row) => {
-        const typedRow = row as ObservationRow;
-        const timelineItemId = stringOrNull(typedRow.timeline_item_id);
-        if (timelineItemId !== null && (timelineItemId.startsWith("moves:") || knownTimelineItemIds.has(timelineItemId))) {
+    const statement = this.db.prepare("SELECT ts, timeline_item_id FROM observations ORDER BY ts, identity");
+    try {
+      stepRows(statement, this.capi, (capi, pointer) => ({
+        ts: numberFrom(capi.sqlite3_column_double(pointer, 0)),
+        timelineItemId: stringOrNull(capi.sqlite3_column_text(pointer, 1))
+      }), (row) => {
+        if (row.timelineItemId !== null && (row.timelineItemId.startsWith("moves:") || knownTimelineItemIds.has(row.timelineItemId))) {
           return;
         }
-        const ts = numberFrom(typedRow.ts);
-        if (start === null || previous === null || ts - previous > maxGap || ts - start >= maxDuration) {
+        if (start === null || previous === null || row.ts - previous > maxGap || row.ts - start >= maxDuration) {
           flush();
-          start = ts;
+          start = row.ts;
         } else {
-          const delta = ts - previous;
+          const delta = row.ts - previous;
           if (delta > 0 && delta <= maxGap) {
             positiveDeltaTotal += delta;
             positiveDeltaCount += 1;
           }
         }
-        previous = ts;
+        previous = row.ts;
         sampleCount += 1;
-      }
-    });
+      });
+    } finally {
+      statement.finalize();
+    }
     flush();
     return windows;
   }
@@ -627,22 +635,22 @@ export class EvidenceLedger {
       samples = [];
     };
 
-    this.db.exec({
-      sql: `${selectObservationsSQL} ORDER BY COALESCE(timeline_item_id, ''), ts, identity`,
-      rowMode: "object",
-      callback: (row) => {
-        const typedRow = row as ObservationRow;
-        const timelineItemId = stringOrNull(typedRow.timeline_item_id);
+    const statement = this.db.prepare(`${selectObservationsSQL} ORDER BY COALESCE(timeline_item_id, ''), ts, identity`);
+    try {
+      stepRows(statement, this.capi, observationRowFrom, (row) => {
+        const timelineItemId = stringOrNull(row.timeline_item_id);
         if (currentItem !== undefined && timelineItemId !== currentItem) {
           flush();
         }
         currentItem = timelineItemId;
-        samples.push(observationRowToSample(typedRow));
+        samples.push(observationRowToSample(row));
         if (timelineItemId === null && samples.length >= 1_000) {
           flush();
         }
-      }
-    });
+      });
+    } finally {
+      statement.finalize();
+    }
     flush();
   }
 
@@ -676,15 +684,13 @@ export class EvidenceLedger {
       group = [];
     };
 
-    this.db.exec({
-      sql: `${selectCanonicalObservationsSQL}
-        ORDER BY ts, lat IS NULL OR lon IS NULL, lat, lon, identity`,
-      rowMode: "object",
-      callback: (row) => {
-        const typedRow = row as ObservationRow;
-        const ts = numberFrom(typedRow.ts);
-        const lat = numberOrNull(typedRow.lat);
-        const lon = numberOrNull(typedRow.lon);
+    const statement = this.db.prepare(`${selectCanonicalObservationsSQL}
+        ORDER BY ts, lat IS NULL OR lon IS NULL, lat, lon, identity`);
+    try {
+      stepRows(statement, this.capi, canonicalRowFrom, (row) => {
+        const ts = numberFrom(row.ts);
+        const lat = numberOrNull(row.lat);
+        const lon = numberOrNull(row.lon);
         const sharesLocation = group.length > 0
           && lat !== null
           && lon !== null
@@ -699,9 +705,11 @@ export class EvidenceLedger {
           currentLat = lat;
           currentLon = lon;
         }
-        group.push(typedRow);
-      }
-    });
+        group.push(row);
+      });
+    } finally {
+      statement.finalize();
+    }
     flushGroup();
     if (samples.length > 0) {
       callback(samples);
@@ -717,7 +725,11 @@ export class EvidenceLedger {
         this.insert.finalize();
         this.insertTombstone.finalize();
         this.insertMovesDay.finalize();
-        this.db.exec("ROLLBACK");
+        try {
+          this.db.exec("ROLLBACK");
+        } catch {
+          void 0;
+        }
       }
       this.db.close();
       if (this.pool && this.filename) {
@@ -779,6 +791,88 @@ const selectCanonicalObservationsSQL = `
     link_revision
   FROM observations
 `;
+
+function stepRows<T>(
+  statement: PreparedStatement,
+  capi: CAPI,
+  readRow: (capi: CAPI, pointer: WasmPointer) => T,
+  onRow: (row: T) => void
+): void {
+  const pointer = statementPointer(statement);
+  while (capi.sqlite3_step(pointer) === capi.SQLITE_ROW) {
+    onRow(readRow(capi, pointer));
+  }
+}
+
+function statementPointer(statement: PreparedStatement): WasmPointer {
+  const pointer = statement.pointer;
+  if (!pointer) {
+    throw new Error("Prepared statement has no pointer");
+  }
+  return pointer;
+}
+
+function observationRowFrom(capi: CAPI, pointer: WasmPointer): ObservationRow {
+  return {
+    sample_id: stringOrNull(capi.sqlite3_column_text(pointer, 0)),
+    timeline_item_id: stringOrNull(capi.sqlite3_column_text(pointer, 1)),
+    ts: numberFrom(capi.sqlite3_column_double(pointer, 2)),
+    lat: nullableColumnNumber(capi, pointer, 3),
+    lon: nullableColumnNumber(capi, pointer, 4),
+    altitude: nullableColumnNumber(capi, pointer, 5),
+    horizontal_accuracy: nullableColumnNumber(capi, pointer, 6),
+    vertical_accuracy: nullableColumnNumber(capi, pointer, 7),
+    speed: nullableColumnNumber(capi, pointer, 8),
+    speed_accuracy: nullableColumnNumber(capi, pointer, 9),
+    course: nullableColumnNumber(capi, pointer, 10),
+    course_accuracy: nullableColumnNumber(capi, pointer, 11),
+    timezone_offset: nullableColumnInteger(capi, pointer, 12),
+    activity: stringOrNull(capi.sqlite3_column_text(pointer, 13)),
+    activity_rank: numberFrom(capi.sqlite3_column_int(pointer, 14)),
+    moving_state: stringOrNull(capi.sqlite3_column_text(pointer, 15))
+  };
+}
+
+function canonicalRowFrom(capi: CAPI, pointer: WasmPointer): ObservationRow {
+  return {
+    identity: stringOrNull(capi.sqlite3_column_text(pointer, 0)),
+    sample_id: stringOrNull(capi.sqlite3_column_text(pointer, 1)),
+    timeline_item_id: stringOrNull(capi.sqlite3_column_text(pointer, 2)),
+    ts: numberFrom(capi.sqlite3_column_double(pointer, 3)),
+    lat: nullableColumnNumber(capi, pointer, 4),
+    lon: nullableColumnNumber(capi, pointer, 5),
+    altitude: nullableColumnNumber(capi, pointer, 6),
+    horizontal_accuracy: nullableColumnNumber(capi, pointer, 7),
+    vertical_accuracy: nullableColumnNumber(capi, pointer, 8),
+    speed: nullableColumnNumber(capi, pointer, 9),
+    speed_accuracy: nullableColumnNumber(capi, pointer, 10),
+    course: nullableColumnNumber(capi, pointer, 11),
+    course_accuracy: nullableColumnNumber(capi, pointer, 12),
+    timezone_offset: nullableColumnInteger(capi, pointer, 13),
+    location_quality: numberFrom(capi.sqlite3_column_double(pointer, 14)),
+    location_tie: stringOrNull(capi.sqlite3_column_text(pointer, 15)),
+    location_revision: numberFrom(capi.sqlite3_column_double(pointer, 16)),
+    activity: stringOrNull(capi.sqlite3_column_text(pointer, 17)),
+    activity_rank: numberFrom(capi.sqlite3_column_int(pointer, 18)),
+    activity_revision: numberFrom(capi.sqlite3_column_double(pointer, 19)),
+    moving_state: stringOrNull(capi.sqlite3_column_text(pointer, 20)),
+    moving_state_rank: numberFrom(capi.sqlite3_column_int(pointer, 21)),
+    moving_state_revision: numberFrom(capi.sqlite3_column_double(pointer, 22)),
+    link_revision: numberFrom(capi.sqlite3_column_double(pointer, 23))
+  };
+}
+
+function nullableColumnNumber(capi: CAPI, pointer: WasmPointer, index: number): number | null {
+  return capi.sqlite3_column_type(pointer, index) === capi.SQLITE_NULL
+    ? null
+    : capi.sqlite3_column_double(pointer, index);
+}
+
+function nullableColumnInteger(capi: CAPI, pointer: WasmPointer, index: number): number | null {
+  return capi.sqlite3_column_type(pointer, index) === capi.SQLITE_NULL
+    ? null
+    : capi.sqlite3_column_int(pointer, index);
+}
 
 function canonicalObservationToSample(rows: ObservationRow[]): Record<string, unknown> {
   const byLocation = [...rows].sort((lhs, rhs) =>
