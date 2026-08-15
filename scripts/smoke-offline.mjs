@@ -1,41 +1,8 @@
-import { spawn } from "node:child_process";
-import { once } from "node:events";
 import { chromium } from "playwright";
 import { strToU8, zipSync } from "fflate";
+import { withPreview } from "./smoke-common.mjs";
 
-const port = 4181;
-const baseUrl = `http://127.0.0.1:${port}`;
-const preview = spawn("npm", ["run", "preview", "-w", "@aura-importer/web", "--", "--port", String(port)], {
-  stdio: ["ignore", "pipe", "pipe"]
-});
-
-let output = "";
-preview.stdout.on("data", (chunk) => { output += chunk.toString(); });
-preview.stderr.on("data", (chunk) => { output += chunk.toString(); });
-
-try {
-  await waitForServer();
-  await runOfflineConversionCheck();
-} finally {
-  preview.kill();
-  await once(preview, "exit").catch(() => undefined);
-}
-
-async function waitForServer() {
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    if (preview.exitCode !== null) throw new Error(`Preview exited early:\n${output}`);
-    try {
-      const r = await fetch(baseUrl);
-      if (r.ok) return;
-    } catch {
-      await new Promise((s) => setTimeout(s, 250));
-    }
-  }
-  throw new Error(`Preview did not start:\n${output}`);
-}
-
-async function runOfflineConversionCheck() {
+await withPreview(4181, async (baseUrl) => {
   const browser = await chromium.launch();
   const context = await browser.newContext({ viewport: { width: 1360, height: 808 }, deviceScaleFactor: 1 });
   const page = await context.newPage();
@@ -136,4 +103,4 @@ async function runOfflineConversionCheck() {
     throw new Error(`Offline conversion failed. hasReady=${hasReady}, hasError=${hasError}`);
   }
   console.log("offline smoke passed");
-}
+});

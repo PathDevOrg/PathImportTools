@@ -1,61 +1,14 @@
-import { spawn } from "node:child_process";
-import { once } from "node:events";
 import { open } from "node:fs/promises";
-import { chromium } from "playwright";
 import { strToU8, zipSync } from "fflate";
+import { openPage, withPreview } from "./smoke-common.mjs";
 
-const port = 4175;
-const baseUrl = `http://127.0.0.1:${port}`;
-const preview = spawn("npm", ["run", "preview", "-w", "@aura-importer/web", "--", "--port", String(port)], {
-  stdio: ["ignore", "pipe", "pipe"]
+await withPreview(4175, async (baseUrl) => {
+  await runMockedDirectoryCheck(baseUrl);
+  await runActualConversionCheck(baseUrl);
 });
 
-let output = "";
-preview.stdout.on("data", (chunk) => {
-  output += chunk.toString();
-});
-preview.stderr.on("data", (chunk) => {
-  output += chunk.toString();
-});
-
-try {
-  await waitForServer();
-  await runMockedDirectoryCheck();
-  await runActualConversionCheck();
-} finally {
-  preview.kill();
-  await once(preview, "exit").catch(() => undefined);
-}
-
-async function waitForServer() {
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    if (preview.exitCode !== null) {
-      throw new Error(`Preview exited early:\n${output}`);
-    }
-    try {
-      const response = await fetch(baseUrl);
-      if (response.ok) {
-        return;
-      }
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-  }
-  throw new Error(`Preview did not start:\n${output}`);
-}
-
-async function runMockedDirectoryCheck() {
-  const browser = await chromium.launch();
-  const page = await browser.newPage({ viewport: { width: 1360, height: 808 }, deviceScaleFactor: 1 });
-  const errors = [];
-  page.on("console", (message) => {
-    if (message.type() === "error") {
-      errors.push(message.text());
-    }
-  });
-  page.on("pageerror", (error) => errors.push(error.message));
-
+async function runMockedDirectoryCheck(baseUrl) {
+  const { browser, page, errors } = await openPage();
   await page.addInitScript(() => {
     window.__savePickerCalled = false;
     window.__lastOutput = null;
@@ -136,16 +89,8 @@ async function runMockedDirectoryCheck() {
   }
 }
 
-async function runActualConversionCheck() {
-  const browser = await chromium.launch();
-  const page = await browser.newPage({ viewport: { width: 1360, height: 808 }, deviceScaleFactor: 1 });
-  const errors = [];
-  page.on("console", (message) => {
-    if (message.type() === "error") {
-      errors.push(message.text());
-    }
-  });
-  page.on("pageerror", (error) => errors.push(error.message));
+async function runActualConversionCheck(baseUrl) {
+  const { browser, page, errors } = await openPage();
   await page.addInitScript(() => {
     window.showDirectoryPicker = undefined;
     window.showSaveFilePicker = undefined;

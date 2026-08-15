@@ -1,49 +1,11 @@
-import { spawn } from "node:child_process";
-import { once } from "node:events";
 import { readFileSync } from "node:fs";
-import { chromium } from "playwright";
 import { zipSync } from "fflate";
+import { openPage, withPreview } from "./smoke-common.mjs";
 
 const monthlyGzPath = process.env.ARC_MONTHLY_GZ
   ?? "/Users/apple/Documents/Aura/PathTools/movesarc/Export/JSON/Monthly/2024-05.json.gz";
 
-const port = 4176;
-const baseUrl = `http://127.0.0.1:${port}`;
-const preview = spawn("npm", ["run", "preview", "-w", "@aura-importer/web", "--", "--port", String(port)], {
-  stdio: ["ignore", "pipe", "pipe"]
-});
-
-let output = "";
-preview.stdout.on("data", (chunk) => { output += chunk.toString(); });
-preview.stderr.on("data", (chunk) => { output += chunk.toString(); });
-
-try {
-  await waitForServer();
-  await runMonthlyConversionCheck();
-} finally {
-  preview.kill();
-  await once(preview, "exit").catch(() => undefined);
-}
-
-async function waitForServer() {
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    if (preview.exitCode !== null) {
-      throw new Error(`Preview exited early:\n${output}`);
-    }
-    try {
-      const response = await fetch(baseUrl);
-      if (response.ok) {
-        return;
-      }
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-  }
-  throw new Error(`Preview did not start:\n${output}`);
-}
-
-async function runMonthlyConversionCheck() {
+await withPreview(4176, async (baseUrl) => {
   const gzBytes = readFileSync(monthlyGzPath);
   if (gzBytes.length < 10_000_000) {
     throw new Error(`Expected a large (>10MB) real monthly gz at ${monthlyGzPath}, got ${gzBytes.length} bytes`);
@@ -53,16 +15,7 @@ async function runMonthlyConversionCheck() {
     "Export/JSON/Monthly/2024-05.json.gz": [gzBytes, { level: 0 }]
   });
 
-  const browser = await chromium.launch();
-  const page = await browser.newPage({ viewport: { width: 1360, height: 808 }, deviceScaleFactor: 1 });
-  const errors = [];
-  page.on("console", (message) => {
-    if (message.type() === "error") {
-      errors.push(message.text());
-    }
-  });
-  page.on("pageerror", (error) => errors.push(error.message));
-  page.on("crash", () => errors.push("page crashed"));
+  const { browser, page, errors } = await openPage();
   await page.addInitScript(() => {
     window.showDirectoryPicker = undefined;
     window.showSaveFilePicker = undefined;
@@ -88,4 +41,4 @@ async function runMonthlyConversionCheck() {
     throw new Error(errors.join("\n"));
   }
   console.log("arc monthly smoke passed");
-}
+});

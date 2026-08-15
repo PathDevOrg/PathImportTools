@@ -8,22 +8,18 @@ import type { WorkerFilePayload, WorkerOutputTarget, WorkerProgress, WorkerReque
 import { pageTitle, type AppStage } from "./pageTitle";
 import { productCopy } from "./productCopy";
 
-type Stage = AppStage;
-
-type SelectedFile = PickedDirectoryFile;
-
 export function App() {
   const directoryInputRef = useRef<HTMLInputElement | null>(null);
   const workerRef = useRef<Worker | null>(null);
   const activeRequestRef = useRef<string | null>(null);
-  const filesRef = useRef<SelectedFile[]>([]);
+  const filesRef = useRef<PickedDirectoryFile[]>([]);
   const downloadUrlRef = useRef<string | null>(null);
   const outputTokenRef = useRef<string | null>(null);
   const autoDownloadedUrlRef = useRef<string | null>(null);
   const outputDirectoryRef = useRef<FileSystemDirectoryHandle | null>(null);
   const outputFilenameRef = useRef<string | null>(null);
   const shouldAskForSaveLocationRef = useRef(false);
-  const [stage, setStage] = useState<Stage>("empty");
+  const [stage, setStage] = useState<AppStage>("empty");
   const [progressDetail, setProgressDetail] = useState<WorkerProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [errorTitle, setErrorTitle] = useState<string | null>(null);
@@ -199,7 +195,7 @@ export function App() {
     sendToWorker("scan", nextFiles);
   }
 
-  function sendToWorker(type: "scan" | "convert", selectedFiles: SelectedFile[], output?: WorkerOutputTarget) {
+  function sendToWorker(type: "scan" | "convert", selectedFiles: PickedDirectoryFile[], output?: WorkerOutputTarget) {
     const worker = workerRef.current;
     if (!worker || selectedFiles.length === 0) {
       return;

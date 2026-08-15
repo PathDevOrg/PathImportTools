@@ -9,20 +9,20 @@ import {
 import { pathSchema } from "./schemaMigrations";
 import { acquireImporterStorageLease, cleanupStaleImporterStorage } from "./opfsCleanup";
 
-export type DatabaseProgress = {
+type DatabaseProgress = {
   phase: "schema" | "write" | "verify" | "export";
   message: string;
   completed: number;
   total: number;
 };
 
-export type DatabaseOutputTarget = {
+type DatabaseOutputTarget = {
   filename: string;
   saveHandle?: FileSystemFileHandle;
   opfsDownload?: boolean;
 };
 
-export type DatabaseOutput = {
+type DatabaseOutput = {
   filename: string;
   savedToDisk: boolean;
   bytes?: Uint8Array;
