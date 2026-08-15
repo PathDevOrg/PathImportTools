@@ -1,5 +1,5 @@
 import { Inflate } from "fflate";
-import type { ImportFileHandle } from "@aura-importer/converter";
+import { initialCrc32, updateCrc32, type ImportFileHandle } from "@aura-importer/converter";
 import type { WorkerFilePayload } from "./workerTypes";
 
 type ZipEntry = {
@@ -84,6 +84,16 @@ async function estimatedZipEntrySize(file: File, entry: ZipEntry): Promise<numbe
   if (!entry.path.toLowerCase().endsWith(".json.gz") || entry.uncompressedSize < 4) {
     return entry.uncompressedSize;
   }
+  const declaredSize = await gzipDeclaredSize(file, entry);
+  return Math.max(declaredSize, entry.uncompressedSize * 4);
+}
+
+async function gzipDeclaredSize(file: File, entry: ZipEntry): Promise<number> {
+  if (entry.compression === 0) {
+    const dataOffset = await zipEntryDataOffset(file, entry);
+    const footer = new Uint8Array(await file.slice(dataOffset + entry.compressedSize - 4, dataOffset + entry.compressedSize).arrayBuffer());
+    return readU32(footer, 0);
+  }
   let footer = new Uint8Array(0);
   for await (const chunk of readZipEntryChunks(file, entry)) {
     const combined = new Uint8Array(Math.min(4, footer.length + chunk.length));
@@ -95,8 +105,15 @@ async function estimatedZipEntrySize(file: File, entry: ZipEntry): Promise<numbe
     combined.set(chunk.subarray(tailStart), retainedFromFooter);
     footer = combined;
   }
-  const declaredSize = readU32(footer, 0);
-  return Math.max(declaredSize, entry.uncompressedSize * 4);
+  return readU32(footer, 0);
+}
+
+async function zipEntryDataOffset(file: File, entry: ZipEntry): Promise<number> {
+  const localHeader = new Uint8Array(await file.slice(entry.localHeaderOffset, entry.localHeaderOffset + 30).arrayBuffer());
+  if (readU32(localHeader, 0) !== zipLocalHeaderSignature) {
+    throw new Error(`Invalid zip local header for ${entry.path}`);
+  }
+  return entry.localHeaderOffset + 30 + readU16(localHeader, 26) + readU16(localHeader, 28);
 }
 
 async function readCentralDirectory(file: File): Promise<ZipEntry[]> {
@@ -234,13 +251,7 @@ async function readZipEntry(file: File, entry: ZipEntry): Promise<Uint8Array> {
 }
 
 async function* readZipEntryChunks(file: File, entry: ZipEntry): AsyncGenerator<Uint8Array> {
-  const localHeader = new Uint8Array(await file.slice(entry.localHeaderOffset, entry.localHeaderOffset + 30).arrayBuffer());
-  if (readU32(localHeader, 0) !== zipLocalHeaderSignature) {
-    throw new Error(`Invalid zip local header for ${entry.path}`);
-  }
-  const nameLength = readU16(localHeader, 26);
-  const extraLength = readU16(localHeader, 28);
-  const dataOffset = entry.localHeaderOffset + 30 + nameLength + extraLength;
+  const dataOffset = await zipEntryDataOffset(file, entry);
   if (entry.compression === 0) {
     if (entry.compressedSize !== entry.uncompressedSize) {
       throw new Error(`Stored zip entry size does not match its directory record: ${entry.path}`);
@@ -288,23 +299,6 @@ async function* readZipEntryChunks(file: File, entry: ZipEntry): AsyncGenerator<
     return;
   }
   throw new Error(`Unsupported zip compression method ${entry.compression} in ${entry.path}`);
-}
-
-const initialCrc32 = 0xffffffff;
-const crc32Table = Uint32Array.from({ length: 256 }, (_, value) => {
-  let crc = value;
-  for (let bit = 0; bit < 8; bit += 1) {
-    crc = crc & 1 ? 0xedb88320 ^ crc >>> 1 : crc >>> 1;
-  }
-  return crc >>> 0;
-});
-
-function updateCrc32(crc: number, bytes: Uint8Array): number {
-  let current = crc;
-  for (const byte of bytes) {
-    current = crc32Table[(current ^ byte) & 0xff]! ^ current >>> 8;
-  }
-  return current >>> 0;
 }
 
 function verifyCrc32(entry: ZipEntry, crc: number): void {

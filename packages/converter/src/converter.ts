@@ -934,15 +934,6 @@ function arcItemScore(item: JsonObject, sampleCount = arrayValue(item.samples).l
   ];
 }
 
-function compareArcItemScores(lhs: ArcItemScore, rhs: ArcItemScore): number {
-  for (let index = 0; index < lhs.length; index += 1) {
-    if (lhs[index] !== rhs[index]) {
-      return lhs[index]! - rhs[index]!;
-    }
-  }
-  return 0;
-}
-
 type FusedArcItem = {
   item: JsonObject;
   sampleCount: number;
@@ -1033,7 +1024,7 @@ function fuseArcItemCandidates(candidates: ArcItemCandidate[], observationLink: 
     if (revisionDifference !== 0) {
       return revisionDifference;
     }
-    const score = compareArcItemScores(
+    const score = compareNumericTuples(
       arcItemScore(lhs.item, lhs.sampleCount),
       arcItemScore(rhs.item, rhs.sampleCount)
     );

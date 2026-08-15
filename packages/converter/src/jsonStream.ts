@@ -181,7 +181,7 @@ async function* gunzipChunks(path: string, chunks: AsyncIterable<Uint8Array>): A
   }
 }
 
-const initialCrc32 = 0xffffffff;
+export const initialCrc32 = 0xffffffff;
 const crc32Table = Uint32Array.from({ length: 256 }, (_, value) => {
   let crc = value;
   for (let bit = 0; bit < 8; bit += 1) {
@@ -190,7 +190,7 @@ const crc32Table = Uint32Array.from({ length: 256 }, (_, value) => {
   return crc >>> 0;
 });
 
-function updateCrc32(crc: number, bytes: Uint8Array): number {
+export function updateCrc32(crc: number, bytes: Uint8Array): number {
   let current = crc;
   for (const byte of bytes) {
     current = crc32Table[(current ^ byte) & 0xff]! ^ current >>> 8;

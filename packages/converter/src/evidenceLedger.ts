@@ -1,4 +1,5 @@
 import sqlite3InitModule, { type Database, type PreparedStatement, type SAHPoolUtil } from "@sqlite.org/sqlite-wasm";
+import { acquireStorageLease, cleanupStaleDirectories } from "./opfsStorage.js";
 
 export type ObservationEvidence = {
   identity: string;
@@ -26,11 +27,6 @@ export type ObservationEvidence = {
 
 type ObservationRow = Record<string, string | number | bigint | Uint8Array | ArrayBuffer | null>;
 
-interface LockManagerLike {
-  request<T>(name: string, options: { ifAvailable: true }, callback: (lock: unknown | null) => Promise<T>): Promise<T>;
-  request<T>(name: string, callback: (lock: unknown) => Promise<T>): Promise<T>;
-}
-
 let sqliteModulePromise: ReturnType<typeof sqlite3InitModule> | null = null;
 
 export class EvidenceLedger {
@@ -51,7 +47,7 @@ export class EvidenceLedger {
   static async create(): Promise<EvidenceLedger> {
     sqliteModulePromise ??= sqlite3InitModule();
     const sqlite3 = await sqliteModulePromise;
-    await cleanupStaleEvidenceStorage();
+    await cleanupStaleDirectories("aura-importer-evidence-", "aura-importer-temp:evidence/");
     let pool: SAHPoolUtil | null = null;
     let filename: string | null = null;
     let db: Database;
@@ -60,7 +56,7 @@ export class EvidenceLedger {
     if (typeof navigator !== "undefined" && navigator.storage && sqlite3.installOpfsSAHPoolVfs) {
       const poolId = `${Date.now()}-${Math.round(Math.random() * 1_000_000)}`;
       const directoryName = `aura-importer-evidence-${poolId}`;
-      releaseStorageLease = await acquireEvidenceStorageLease(directoryName);
+      releaseStorageLease = await acquireStorageLease(`aura-importer-temp:evidence/${directoryName}`);
       try {
         pool = await sqlite3.installOpfsSAHPoolVfs({
           name: directoryName,
@@ -733,72 +729,6 @@ export class EvidenceLedger {
       this.closed = true;
     }
   }
-}
-
-async function cleanupStaleEvidenceStorage(): Promise<void> {
-  if (typeof navigator === "undefined" || !navigator.storage?.getDirectory) {
-    return;
-  }
-  const root = await navigator.storage.getDirectory() as FileSystemDirectoryHandle & {
-    entries: () => AsyncIterableIterator<[string, FileSystemHandle]>;
-  };
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-  const locks = (navigator as Navigator & { locks?: LockManagerLike }).locks;
-  for await (const [name, handle] of root.entries()) {
-    if (handle.kind !== "directory" || !name.startsWith("aura-importer-evidence-")) {
-      continue;
-    }
-    const timestamp = Number(/^(\d{13})(?:-|$)/.exec(name.slice("aura-importer-evidence-".length))?.[1]);
-    if (!Number.isFinite(timestamp) || !locks && timestamp >= cutoff) {
-      continue;
-    }
-    const remove = async (): Promise<void> => {
-      try {
-        await root.removeEntry(name, { recursive: true });
-      } catch (error) {
-        if (!(error instanceof DOMException) || error.name !== "NotFoundError") {
-          throw error;
-        }
-      }
-    };
-    if (locks) {
-      await locks.request(`aura-importer-temp:evidence/${name}`, { ifAvailable: true }, async (lock) => {
-        if (lock) {
-          await remove();
-        }
-      });
-    } else {
-      await remove();
-    }
-  }
-}
-
-async function acquireEvidenceStorageLease(directoryName: string): Promise<() => Promise<void>> {
-  const locks = (navigator as Navigator & { locks?: LockManagerLike }).locks;
-  if (!locks) {
-    return async () => undefined;
-  }
-  let release: (() => void) | null = null;
-  let acquired: (() => void) | null = null;
-  const acquiredPromise = new Promise<void>((resolve) => {
-    acquired = resolve;
-  });
-  const held = locks.request(`aura-importer-temp:evidence/${directoryName}`, async () => {
-    acquired?.();
-    await new Promise<void>((resolve) => {
-      release = resolve;
-    });
-  });
-  await acquiredPromise;
-  let released = false;
-  return async () => {
-    if (released) {
-      return;
-    }
-    released = true;
-    release?.();
-    await held;
-  };
 }
 
 const preferredLocationSQL = `(
