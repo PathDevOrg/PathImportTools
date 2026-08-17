@@ -1,3 +1,4 @@
+import { Github } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
   CompleteState,
@@ -337,8 +338,15 @@ export function App() {
           <img src="/path-logo.png" alt="" />
           <strong>{productCopy.appName}</strong>
         </a>
-        <a className="app-store-badge" href={productCopy.appDownloadHref} aria-label={productCopy.downloadAppLabel}>
-          <img src="/download-on-the-app-store.svg" alt={productCopy.downloadAppLabel} />
+        <a
+          className="github-badge"
+          href={productCopy.githubRepoHref}
+          target="_blank"
+          rel="noreferrer"
+          aria-label={productCopy.githubRepoLabel}
+        >
+          <Github size={19} aria-hidden="true" />
+          <span>GitHub</span>
         </a>
       </nav>
 

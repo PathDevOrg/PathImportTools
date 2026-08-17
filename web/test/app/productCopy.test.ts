@@ -7,7 +7,7 @@ describe("productCopy", () => {
     const visibleText = JSON.stringify(productCopy);
 
     expect(productCopy.appName).toBe("Path Import");
-    expect(productCopy.downloadAppLabel).toBe("Download on the App Store");
+    expect(productCopy.githubRepoLabel).toBe("View source on GitHub");
     expect(visibleText).not.toContain("Aura");
   });
 
@@ -17,8 +17,9 @@ describe("productCopy", () => {
 
     expect(productCopy.heroTitle).toBe("Convert Arc and Moves backups locally");
     expect(productCopy.heroBody).toBe("Select a backup folder. Path Import creates a database file locally.");
-    expect(productCopy.appDownloadHref).toBe("https://apps.apple.com/app/id6758724528");
-    expect(appSource).toContain("/download-on-the-app-store.svg");
+    expect(productCopy.githubRepoHref).toBe("https://github.com/PathDevOrg/PathImportTools");
+    expect(appSource).toContain("githubRepoHref");
+    expect(appSource).toContain("github-badge");
     expect(appSource).toContain("pickDirectoryFiles");
     expect(appSource).toContain("outputDirectoryRef");
     expect(componentSource).toContain("privacy-footer");

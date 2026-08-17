@@ -87,7 +87,7 @@ async function runMockedDirectoryCheck(baseUrl) {
     savePickerCalled: window.__savePickerCalled,
     outputName: window.__lastOutput?.filename,
     hasSaveHandle: Boolean(window.__lastOutput?.saveHandle),
-    appStoreHref: document.querySelector(".app-store-badge")?.href,
+    githubHref: document.querySelector(".github-badge")?.href,
     body: document.body.innerText,
   }));
   await page.screenshot({ path: "/tmp/path-import-smoke.png", fullPage: true });
@@ -100,7 +100,7 @@ async function runMockedDirectoryCheck(baseUrl) {
     throw new Error(JSON.stringify(result, null, 2));
   }
   if (
-    result.appStoreHref !== "https://apps.apple.com/app/id6758724528" ||
+    result.githubHref !== "https://github.com/PathDevOrg/PathImportTools" ||
     !result.body.includes("designed to work offline")
   ) {
     throw new Error(JSON.stringify(result, null, 2));

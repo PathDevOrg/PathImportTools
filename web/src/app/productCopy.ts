@@ -1,7 +1,7 @@
 export const productCopy = {
   appName: "Path Import",
-  downloadAppLabel: "Download on the App Store",
-  appDownloadHref: "https://apps.apple.com/app/id6758724528",
+  githubRepoLabel: "View source on GitHub",
+  githubRepoHref: "https://github.com/PathDevOrg/PathImportTools",
   navHomeLabel: "Path Import home",
   heroTitle: "Convert Arc and Moves backups locally",
   heroBody: "Select a backup folder. Path Import creates a database file locally.",
