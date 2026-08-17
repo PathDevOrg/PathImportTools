@@ -1,12 +1,20 @@
-import { Tokenizer, TokenParser, TokenType, type ParsedTokenInfo } from "@streamparser/json";
+import { type ParsedTokenInfo, Tokenizer, TokenParser, TokenType } from "@streamparser/json";
 import { Gunzip } from "fflate";
+import { rootObjectStreamingFallbackChars, rootObjectStreamingFallbackTokens } from "./constants.js";
 
 export type StreamedJsonShape = "root-array" | "timeline-items" | "root-object";
+
+type StreamValueHandler = (value: unknown, shape: StreamedJsonShape) => boolean | undefined;
+
+type StreamJsonOptions = {
+  signal?: AbortSignal;
+};
 
 export async function streamJsonValues(
   path: string,
   chunks: AsyncIterable<Uint8Array>,
-  onValue: (value: unknown, shape: StreamedJsonShape) => void
+  onValue: StreamValueHandler,
+  options: StreamJsonOptions = {},
 ): Promise<StreamedJsonShape> {
   const tokenizer = new Tokenizer({ stringBufferSize: 64 * 1024 });
   const bufferedTokens: ParsedTokenInfo[] = [];
@@ -16,29 +24,41 @@ export async function streamJsonValues(
   let depth = 0;
   let expectingRootKey = false;
   let sawToken = false;
+  let stopRequested = false;
+  let bufferedValueChars = 0;
 
   const beginParsing = (selectedShape: StreamedJsonShape): void => {
     shape = selectedShape;
-    const paths = selectedShape === "root-array"
-      ? ["$.*"]
-      : selectedShape === "timeline-items"
-        ? ["$.timelineItems.*"]
-        : ["$"];
+    const paths =
+      selectedShape === "root-array" ? ["$.*"] : selectedShape === "timeline-items" ? ["$.timelineItems.*"] : ["$"];
     parser = new TokenParser({ paths, keepStack: false });
-    parser.onValue = ({ value }) => onValue(value, selectedShape);
+    parser.onValue = ({ value }) => {
+      if (!stopRequested && onValue(value, selectedShape) === true) {
+        stopRequested = true;
+      }
+    };
     for (const token of bufferedTokens) {
+      if (stopRequested) {
+        break;
+      }
       parser.write(token);
     }
     bufferedTokens.length = 0;
+    bufferedValueChars = 0;
   };
 
   tokenizer.onToken = (token): void => {
+    throwIfAborted(options.signal);
     sawToken = true;
+    if (stopRequested) {
+      return;
+    }
     if (parser) {
       parser.write(token);
       return;
     }
     bufferedTokens.push(token);
+    bufferedValueChars += tokenValueChars(token);
     if (bufferedTokens.length === 1) {
       if (token.token === TokenType.LEFT_BRACKET) {
         beginParsing("root-array");
@@ -60,7 +80,12 @@ export async function streamJsonValues(
         beginParsing("timeline-items");
         return;
       }
-      if (token.value === "itemId" || token.value === "placeId" || token.value === "sampleId" || token.value === "segments") {
+      if (
+        token.value === "itemId" ||
+        token.value === "placeId" ||
+        token.value === "sampleId" ||
+        token.value === "segments"
+      ) {
         beginParsing("root-object");
         return;
       }
@@ -71,26 +96,39 @@ export async function streamJsonValues(
       depth -= 1;
       if (depth === 0) {
         beginParsing("root-object");
+        return;
       }
     } else if (token.token === TokenType.COMMA && depth === 1) {
       expectingRootKey = true;
     }
+    if (
+      bufferedValueChars > rootObjectStreamingFallbackChars ||
+      bufferedTokens.length > rootObjectStreamingFallbackTokens
+    ) {
+      beginParsing("root-object");
+    }
   };
 
-  for await (const chunk of gunzipChunks(path, chunks)) {
+  for await (const chunk of gunzipChunks(path, chunks, options.signal)) {
+    throwIfAborted(options.signal);
     if (chunk.byteLength > 0) {
       tokenizer.write(chunk);
+    }
+    if (stopRequested) {
+      break;
     }
   }
   if (!sawToken) {
     throw new Error("History JSON is empty");
   }
-  if (!tokenizer.isEnded) {
-    tokenizer.end();
-  }
-  const completedParser = parser as TokenParser | null;
-  if (completedParser && !completedParser.isEnded) {
-    completedParser.end();
+  if (!stopRequested) {
+    if (!tokenizer.isEnded) {
+      tokenizer.end();
+    }
+    const completedParser = parser as TokenParser | null;
+    if (completedParser && !completedParser.isEnded) {
+      completedParser.end();
+    }
   }
   if (!shape) {
     throw new Error("History JSON has no root value");
@@ -98,12 +136,17 @@ export async function streamJsonValues(
   return shape;
 }
 
-async function* gunzipChunks(path: string, chunks: AsyncIterable<Uint8Array>): AsyncGenerator<Uint8Array> {
+async function* gunzipChunks(
+  path: string,
+  chunks: AsyncIterable<Uint8Array>,
+  signal?: AbortSignal,
+): AsyncGenerator<Uint8Array> {
   const iterator = chunks[Symbol.asyncIterator]();
   try {
     const pending: Uint8Array[] = [];
     let pendingBytes = 0;
     while (pendingBytes < 2) {
+      throwIfAborted(signal);
       const next = await iterator.next();
       if (next.done) {
         break;
@@ -114,11 +157,11 @@ async function* gunzipChunks(path: string, chunks: AsyncIterable<Uint8Array>): A
       }
     }
     const signature = firstBytes(pending, 2);
-    const compressed = path.toLowerCase().endsWith(".gz")
-      || signature[0] === 0x1f && signature[1] === 0x8b;
+    const compressed = path.toLowerCase().endsWith(".gz") || (signature[0] === 0x1f && signature[1] === 0x8b);
     if (!compressed) {
       yield* pending;
       while (true) {
+        throwIfAborted(signal);
         const next = await iterator.next();
         if (next.done) {
           return;
@@ -149,16 +192,19 @@ async function* gunzipChunks(path: string, chunks: AsyncIterable<Uint8Array>): A
     };
     let current = await nextChunk();
     while (!current.done) {
+      throwIfAborted(signal);
       const next = await nextChunk();
       compressedBytes += current.value.byteLength;
       trailer = trailingBytes(trailer, current.value, 8);
       gunzip.push(current.value, next.done === true);
       while (output.length > 0) {
+        throwIfAborted(signal);
         yield output.shift()!;
       }
       current = next;
     }
     while (output.length > 0) {
+      throwIfAborted(signal);
       yield output.shift()!;
     }
     if (memberCount !== 1) {
@@ -181,11 +227,21 @@ async function* gunzipChunks(path: string, chunks: AsyncIterable<Uint8Array>): A
   }
 }
 
+function tokenValueChars(token: ParsedTokenInfo): number {
+  return typeof token.value === "string" ? token.value.length : 0;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new DOMException("The operation was cancelled", "AbortError");
+  }
+}
+
 export const initialCrc32 = 0xffffffff;
 const crc32Table = Uint32Array.from({ length: 256 }, (_, value) => {
   let crc = value;
   for (let bit = 0; bit < 8; bit += 1) {
-    crc = crc & 1 ? 0xedb88320 ^ crc >>> 1 : crc >>> 1;
+    crc = crc & 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1;
   }
   return crc >>> 0;
 });
@@ -193,7 +249,7 @@ const crc32Table = Uint32Array.from({ length: 256 }, (_, value) => {
 export function updateCrc32(crc: number, bytes: Uint8Array): number {
   let current = crc;
   for (const byte of bytes) {
-    current = crc32Table[(current ^ byte) & 0xff]! ^ current >>> 8;
+    current = crc32Table[(current ^ byte) & 0xff]! ^ (current >>> 8);
   }
   return current >>> 0;
 }

@@ -12,21 +12,28 @@ const movesStoryline = [
         type: "place",
         startTime: "20140401T080000+0300",
         endTime: "20140401T090000+0300",
-        place: { id: 42, name: "Home", location: { lat: 60.17, lon: 24.94 } }
+        place: { id: 42, name: "Home", location: { lat: 60.17, lon: 24.94 } },
       },
       {
         type: "move",
         startTime: "20140401T090000+0300",
         endTime: "20140401T093000+0300",
-        activities: [{
-          activity: "tram", group: "transport",
-          startTime: "20140401T090000+0300", endTime: "20140401T093000+0300",
-          distance: 1500,
-          trackPoints: [{ lat: 60.17, lon: 24.94 }, { lat: 60.18, lon: 24.95 }]
-        }]
-      }
-    ]
-  }
+        activities: [
+          {
+            activity: "tram",
+            group: "transport",
+            startTime: "20140401T090000+0300",
+            endTime: "20140401T093000+0300",
+            distance: 1500,
+            trackPoints: [
+              { lat: 60.17, lon: 24.94 },
+              { lat: 60.18, lon: 24.95 },
+            ],
+          },
+        ],
+      },
+    ],
+  },
 ];
 
 await withPreview(port, async (baseUrl) => {
@@ -40,8 +47,8 @@ await withPreview(port, async (baseUrl) => {
         name: opts?.suggestedName ?? "aura-import.db",
         createWritable: async () => ({
           write: async () => {},
-          close: async () => {}
-        })
+          close: async () => {},
+        }),
       });
       window.showDirectoryPicker = async () => ({
         kind: "directory",
@@ -57,60 +64,99 @@ await withPreview(port, async (baseUrl) => {
             createWritable: async () => {
               const chunks = [];
               return {
-                write: async (chunk) => { chunks.push(chunk); },
-                close: async () => { window.__writtenChunks = chunks; }
+                write: async (chunk) => {
+                  chunks.push(chunk);
+                },
+                close: async () => {
+                  window.__writtenChunks = chunks;
+                },
               };
-            }
+            },
           };
         },
         entries: async function* () {
-          yield ["json", {
-            kind: "directory",
-            name: "json",
-            getFileHandle: async () => null,
-            entries: async function* () {
-              yield ["daily", {
-                kind: "directory",
-                name: "daily",
-                entries: async function* () {
-                  yield ["storyline", {
+          yield [
+            "json",
+            {
+              kind: "directory",
+              name: "json",
+              getFileHandle: async () => null,
+              entries: async function* () {
+                yield [
+                  "daily",
+                  {
                     kind: "directory",
-                    name: "storyline",
+                    name: "daily",
                     entries: async function* () {
-                      yield ["storyline_20140401.json", {
-                        kind: "file",
-                        name: "storyline_20140401.json",
-                        getFile: async () => new File([contentBytes], "storyline_20140401.json", { type: "application/json" })
-                      }];
-                    }
-                  }];
-                  yield ["activities", {
-                    kind: "directory",
-                    name: "activities",
-                    entries: async function* () {
-                      yield ["activities_20140401.json", {
-                        kind: "file",
-                        name: "activities_20140401.json",
-                        getFile: async () => new File([JSON.stringify([{ date: "20140401", segments: null }])], "activities_20140401.json", { type: "application/json" })
-                      }];
-                    }
-                  }];
-                  yield ["summary", {
-                    kind: "directory",
-                    name: "summary",
-                    entries: async function* () {
-                      yield ["summary_20140401.json", {
-                        kind: "file",
-                        name: "summary_20140401.json",
-                        getFile: async () => new File([JSON.stringify([{ date: "20140401", summary: null, caloriesIdle: 1 }])], "summary_20140401.json", { type: "application/json" })
-                      }];
-                    }
-                  }];
-                }
-              }];
-            }
-          }];
-        }
+                      yield [
+                        "storyline",
+                        {
+                          kind: "directory",
+                          name: "storyline",
+                          entries: async function* () {
+                            yield [
+                              "storyline_20140401.json",
+                              {
+                                kind: "file",
+                                name: "storyline_20140401.json",
+                                getFile: async () =>
+                                  new File([contentBytes], "storyline_20140401.json", { type: "application/json" }),
+                              },
+                            ];
+                          },
+                        },
+                      ];
+                      yield [
+                        "activities",
+                        {
+                          kind: "directory",
+                          name: "activities",
+                          entries: async function* () {
+                            yield [
+                              "activities_20140401.json",
+                              {
+                                kind: "file",
+                                name: "activities_20140401.json",
+                                getFile: async () =>
+                                  new File(
+                                    [JSON.stringify([{ date: "20140401", segments: null }])],
+                                    "activities_20140401.json",
+                                    { type: "application/json" },
+                                  ),
+                              },
+                            ];
+                          },
+                        },
+                      ];
+                      yield [
+                        "summary",
+                        {
+                          kind: "directory",
+                          name: "summary",
+                          entries: async function* () {
+                            yield [
+                              "summary_20140401.json",
+                              {
+                                kind: "file",
+                                name: "summary_20140401.json",
+                                getFile: async () =>
+                                  new File(
+                                    [JSON.stringify([{ date: "20140401", summary: null, caloriesIdle: 1 }])],
+                                    "summary_20140401.json",
+                                    { type: "application/json" },
+                                  ),
+                              },
+                            ];
+                          },
+                        },
+                      ];
+                    },
+                  },
+                ];
+              },
+            },
+          ];
+        },
       });
     }, JSON.stringify(movesStoryline));
   } else {
@@ -131,12 +177,12 @@ await withPreview(port, async (baseUrl) => {
       input?.removeAttribute("directory");
     });
     const archive = zipSync({
-      "moves_export/json/daily/storyline/storyline_20140401.json": strToU8(JSON.stringify(movesStoryline))
+      "moves_export/json/daily/storyline/storyline_20140401.json": strToU8(JSON.stringify(movesStoryline)),
     });
     await page.locator("input[type=file]").setInputFiles({
       name: "moves-only.zip",
       mimeType: "application/zip",
-      buffer: Buffer.from(archive)
+      buffer: Buffer.from(archive),
     });
   }
 
@@ -145,7 +191,7 @@ await withPreview(port, async (baseUrl) => {
     await Promise.race([
       page.getByText("Import file ready").waitFor({ timeout: 60_000 }),
       page.getByText("not recognized").waitFor({ timeout: 60_000 }),
-      page.getByText(/could not find/i).waitFor({ timeout: 60_000 })
+      page.getByText(/could not find/i).waitFor({ timeout: 60_000 }),
     ]);
   } catch {
     void 0;
@@ -164,7 +210,9 @@ await withPreview(port, async (baseUrl) => {
   console.log({ hasReady, hasError, reachedConverting });
 
   if (hasError || !(hasReady || reachedConverting)) {
-    throw new Error(`Moves-only ${useDirectory ? "directory " : ""}not recognized. hasReady=${hasReady} hasError=${hasError} reachedConverting=${reachedConverting}`);
+    throw new Error(
+      `Moves-only ${useDirectory ? "directory " : ""}not recognized. hasReady=${hasReady} hasError=${hasError} reachedConverting=${reachedConverting}`,
+    );
   }
   console.log(`moves-only ${useDirectory ? "directory " : ""}smoke passed`);
 });

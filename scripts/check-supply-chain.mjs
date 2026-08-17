@@ -22,20 +22,17 @@ const exactBlocks = new Map([
   ["strip-ansi", new Set(["7.1.1"])],
   ["supports-color", new Set(["10.2.1"])],
   ["supports-hyperlinks", new Set(["4.1.1"])],
-  ["wrap-ansi", new Set(["9.0.1"])]
+  ["wrap-ansi", new Set(["9.0.1"])],
 ]);
 
 const blockedNames = new Set([
   "@opensearch-project/opensearch",
   "@uipath/robot",
   "@ctrl/tinycolor",
-  "eslint-config-prettier"
+  "eslint-config-prettier",
 ]);
 
-const blockedPrefixes = [
-  "@tanstack/",
-  "@mistralai/"
-];
+const blockedPrefixes = ["@tanstack/", "@mistralai/"];
 
 const lockfile = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));
 const findings = [];

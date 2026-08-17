@@ -7,3 +7,4 @@ dist-ts/
 .vite/
 
 .wrangler/
+web/public/sqlite3.wasm

@@ -1,4 +1,11 @@
-import sqlite3InitModule, { type CAPI, type Database, type PreparedStatement, type SAHPoolUtil, type WasmPointer } from "@sqlite.org/sqlite-wasm";
+import sqlite3InitModule, {
+  type CAPI,
+  type Database,
+  type PreparedStatement,
+  type SAHPoolUtil,
+  type WasmPointer,
+} from "@sqlite.org/sqlite-wasm";
+import { maximumObservationGapS, maximumUnlinkedObservationWindowS, streamingRowBatchSize } from "./constants.js";
 import { acquireStorageLease, cleanupStaleDirectories } from "./opfsStorage.js";
 
 export type ObservationEvidence = {
@@ -42,7 +49,7 @@ export class EvidenceLedger {
     private readonly pool: SAHPoolUtil | null,
     private readonly filename: string | null,
     private readonly releaseStorageLease: () => Promise<void>,
-    private readonly capi: CAPI
+    private readonly capi: CAPI,
   ) {}
 
   static async create(): Promise<EvidenceLedger> {
@@ -63,7 +70,7 @@ export class EvidenceLedger {
           name: directoryName,
           directory: `/${directoryName}`,
           initialCapacity: 12,
-          clearOnInit: true
+          clearOnInit: true,
         });
         filename = "/evidence.db";
         db = new pool.OpfsSAHPoolDb(filename);
@@ -214,7 +221,16 @@ export class EvidenceLedger {
         source_path = MIN(moves_day_candidates.source_path, excluded.source_path)
     `);
 
-      return new EvidenceLedger(db, insert, insertTombstone, insertMovesDay, pool, filename, releaseStorageLease, sqlite3.capi);
+      return new EvidenceLedger(
+        db,
+        insert,
+        insertTombstone,
+        insertMovesDay,
+        pool,
+        filename,
+        releaseStorageLease,
+        sqlite3.capi,
+      );
     } catch (error) {
       try {
         db.close();
@@ -233,33 +249,35 @@ export class EvidenceLedger {
     if (this.sealed || this.closed) {
       throw new Error("Evidence ledger is no longer writable");
     }
-    this.insert.bind([
-      evidence.identity,
-      evidence.sampleId,
-      evidence.timelineItemId,
-      evidence.ts,
-      evidence.lat,
-      evidence.lon,
-      evidence.altitude,
-      evidence.horizontalAccuracy,
-      evidence.verticalAccuracy,
-      evidence.speed,
-      evidence.speedAccuracy,
-      evidence.course,
-      evidence.courseAccuracy,
-      evidence.timezoneOffset,
-      evidence.locationQuality,
-      evidence.locationTie,
-      evidence.activity,
-      evidence.activityRank,
-      evidence.movingState,
-      evidence.movingStateRank,
-      evidence.revision,
-      evidence.revision,
-      evidence.revision,
-      evidence.revision,
-      evidence.revision
-    ]).stepReset();
+    this.insert
+      .bind([
+        evidence.identity,
+        evidence.sampleId,
+        evidence.timelineItemId,
+        evidence.ts,
+        evidence.lat,
+        evidence.lon,
+        evidence.altitude,
+        evidence.horizontalAccuracy,
+        evidence.verticalAccuracy,
+        evidence.speed,
+        evidence.speedAccuracy,
+        evidence.course,
+        evidence.courseAccuracy,
+        evidence.timezoneOffset,
+        evidence.locationQuality,
+        evidence.locationTie,
+        evidence.activity,
+        evidence.activityRank,
+        evidence.movingState,
+        evidence.movingStateRank,
+        evidence.revision,
+        evidence.revision,
+        evidence.revision,
+        evidence.revision,
+        evidence.revision,
+      ])
+      .stepReset();
   }
 
   addTombstone(sampleId: string, revision: number): void {
@@ -269,12 +287,7 @@ export class EvidenceLedger {
     this.insertTombstone.bind([sampleId, revision]).stepReset();
   }
 
-  addMovesDayCandidate(
-    date: string,
-    sourcePath: string,
-    fingerprint: string,
-    candidateJson: string
-  ): void {
+  addMovesDayCandidate(date: string, sourcePath: string, fingerprint: string, candidateJson: string): void {
     if (this.sealed || this.closed) {
       throw new Error("Evidence ledger is no longer writable");
     }
@@ -291,7 +304,7 @@ export class EvidenceLedger {
         if (date) {
           dates.push(date);
         }
-      }
+      },
     });
     return dates;
   }
@@ -324,7 +337,7 @@ export class EvidenceLedger {
           throw new Error(`Invalid stored Moves day for ${date}`);
         }
         candidates.push({ path, fingerprint, day: day as Record<string, unknown> });
-      }
+      },
     });
     return candidates;
   }
@@ -339,7 +352,7 @@ export class EvidenceLedger {
         VALUES (?, ?)
         ON CONFLICT(date) DO UPDATE SET day_json = excluded.day_json
       `,
-      bind: [date, JSON.stringify(day)]
+      bind: [date, JSON.stringify(day)],
     });
     this.db.exec({ sql: "DELETE FROM moves_day_candidates WHERE date = ?", bind: [date] });
   }
@@ -359,7 +372,7 @@ export class EvidenceLedger {
           throw new Error("Invalid stored fused Moves day");
         }
         callback(day as Record<string, unknown>);
-      }
+      },
     });
   }
 
@@ -503,20 +516,6 @@ export class EvidenceLedger {
     this.sealed = true;
   }
 
-  firstObservation(timelineItemId: string): Record<string, unknown> | null {
-    this.seal();
-    const statement = this.db.prepare(`${selectObservationsSQL} WHERE timeline_item_id = ? ORDER BY ts, identity LIMIT 1`);
-    try {
-      statement.bind([timelineItemId]);
-      const pointer = statementPointer(statement);
-      return this.capi.sqlite3_step(pointer) === this.capi.SQLITE_ROW
-        ? observationRowToSample(observationRowFrom(this.capi, pointer))
-        : null;
-    } finally {
-      statement.finalize();
-    }
-  }
-
   observationsForTimelineItem(timelineItemId: string): Record<string, unknown>[] {
     this.seal();
     const samples: Record<string, unknown>[] = [];
@@ -550,7 +549,7 @@ export class EvidenceLedger {
   unlinkedObservationsBetween(
     start: number,
     end: number,
-    knownTimelineItemIds: ReadonlySet<string> = new Set()
+    knownTimelineItemIds: ReadonlySet<string> = new Set(),
   ): Record<string, unknown>[] {
     this.seal();
     const samples: Record<string, unknown>[] = [];
@@ -559,7 +558,10 @@ export class EvidenceLedger {
       statement.bind([start, end]);
       stepRows(statement, this.capi, observationRowFrom, (row) => {
         const timelineItemId = stringOrNull(row.timeline_item_id);
-        if (timelineItemId === null || !timelineItemId.startsWith("moves:") && !knownTimelineItemIds.has(timelineItemId)) {
+        if (
+          timelineItemId === null ||
+          (!timelineItemId.startsWith("moves:") && !knownTimelineItemIds.has(timelineItemId))
+        ) {
           samples.push(observationRowToSample(row));
         }
       });
@@ -571,8 +573,8 @@ export class EvidenceLedger {
 
   unlinkedObservationWindows(
     knownTimelineItemIds: ReadonlySet<string> = new Set(),
-    maxGap = 600,
-    maxDuration = 21_600
+    maxGap = maximumObservationGapS,
+    maxDuration = maximumUnlinkedObservationWindowS,
   ): Array<{ start: number; end: number }> {
     this.seal();
     const windows: Array<{ start: number; end: number }> = [];
@@ -583,7 +585,10 @@ export class EvidenceLedger {
     let sampleCount = 0;
     const flush = (): void => {
       if (start !== null && previous !== null && sampleCount >= 2) {
-        const extension = Math.max(1, Math.min(60, positiveDeltaCount > 0 ? positiveDeltaTotal / positiveDeltaCount : 60));
+        const extension = Math.max(
+          1,
+          Math.min(60, positiveDeltaCount > 0 ? positiveDeltaTotal / positiveDeltaCount : 60),
+        );
         windows.push({ start, end: previous + extension });
       }
       start = null;
@@ -595,26 +600,34 @@ export class EvidenceLedger {
 
     const statement = this.db.prepare("SELECT ts, timeline_item_id FROM observations ORDER BY ts, identity");
     try {
-      stepRows(statement, this.capi, (capi, pointer) => ({
-        ts: numberFrom(capi.sqlite3_column_double(pointer, 0)),
-        timelineItemId: stringOrNull(capi.sqlite3_column_text(pointer, 1))
-      }), (row) => {
-        if (row.timelineItemId !== null && (row.timelineItemId.startsWith("moves:") || knownTimelineItemIds.has(row.timelineItemId))) {
-          return;
-        }
-        if (start === null || previous === null || row.ts - previous > maxGap || row.ts - start >= maxDuration) {
-          flush();
-          start = row.ts;
-        } else {
-          const delta = row.ts - previous;
-          if (delta > 0 && delta <= maxGap) {
-            positiveDeltaTotal += delta;
-            positiveDeltaCount += 1;
+      stepRows(
+        statement,
+        this.capi,
+        (capi, pointer) => ({
+          ts: numberFrom(capi.sqlite3_column_double(pointer, 0)),
+          timelineItemId: stringOrNull(capi.sqlite3_column_text(pointer, 1)),
+        }),
+        (row) => {
+          if (
+            row.timelineItemId !== null &&
+            (row.timelineItemId.startsWith("moves:") || knownTimelineItemIds.has(row.timelineItemId))
+          ) {
+            return;
           }
-        }
-        previous = row.ts;
-        sampleCount += 1;
-      });
+          if (start === null || previous === null || row.ts - previous > maxGap || row.ts - start >= maxDuration) {
+            flush();
+            start = row.ts;
+          } else {
+            const delta = row.ts - previous;
+            if (delta > 0 && delta <= maxGap) {
+              positiveDeltaTotal += delta;
+              positiveDeltaCount += 1;
+            }
+          }
+          previous = row.ts;
+          sampleCount += 1;
+        },
+      );
     } finally {
       statement.finalize();
     }
@@ -622,9 +635,7 @@ export class EvidenceLedger {
     return windows;
   }
 
-  forEachTimelineItem(
-    callback: (timelineItemId: string | null, samples: Record<string, unknown>[]) => void
-  ): void {
+  forEachTimelineItem(callback: (timelineItemId: string | null, samples: Record<string, unknown>[]) => void): void {
     this.seal();
     let currentItem: string | null | undefined;
     let samples: Record<string, unknown>[] = [];
@@ -644,7 +655,7 @@ export class EvidenceLedger {
         }
         currentItem = timelineItemId;
         samples.push(observationRowToSample(row));
-        if (timelineItemId === null && samples.length >= 1_000) {
+        if (timelineItemId === null && samples.length >= streamingRowBatchSize) {
           flush();
         }
       });
@@ -654,9 +665,7 @@ export class EvidenceLedger {
     flush();
   }
 
-  forEachCanonicalObservation(
-    callback: (samples: Record<string, unknown>[]) => void
-  ): void {
+  forEachCanonicalObservation(callback: (samples: Record<string, unknown>[]) => void): void {
     this.seal();
     let currentTs: number | null = null;
     let currentLat: number | null = null;
@@ -665,7 +674,7 @@ export class EvidenceLedger {
     let samples: Record<string, unknown>[] = [];
     const emit = (sample: Record<string, unknown>): void => {
       samples.push(sample);
-      if (samples.length >= 1_000) {
+      if (samples.length >= streamingRowBatchSize) {
         callback(samples);
         samples = [];
       }
@@ -691,12 +700,13 @@ export class EvidenceLedger {
         const ts = numberFrom(row.ts);
         const lat = numberOrNull(row.lat);
         const lon = numberOrNull(row.lon);
-        const sharesLocation = group.length > 0
-          && lat !== null
-          && lon !== null
-          && currentLat === lat
-          && currentLon === lon
-          && currentTs === ts;
+        const sharesLocation =
+          group.length > 0 &&
+          lat !== null &&
+          lon !== null &&
+          currentLat === lat &&
+          currentLon === lon &&
+          currentTs === ts;
         if (group.length > 0 && !sharesLocation) {
           flushGroup();
         }
@@ -796,7 +806,7 @@ function stepRows<T>(
   statement: PreparedStatement,
   capi: CAPI,
   readRow: (capi: CAPI, pointer: WasmPointer) => T,
-  onRow: (row: T) => void
+  onRow: (row: T) => void,
 ): void {
   const pointer = statementPointer(statement);
   while (capi.sqlite3_step(pointer) === capi.SQLITE_ROW) {
@@ -829,7 +839,7 @@ function observationRowFrom(capi: CAPI, pointer: WasmPointer): ObservationRow {
     timezone_offset: nullableColumnInteger(capi, pointer, 12),
     activity: stringOrNull(capi.sqlite3_column_text(pointer, 13)),
     activity_rank: numberFrom(capi.sqlite3_column_int(pointer, 14)),
-    moving_state: stringOrNull(capi.sqlite3_column_text(pointer, 15))
+    moving_state: stringOrNull(capi.sqlite3_column_text(pointer, 15)),
   };
 }
 
@@ -858,7 +868,7 @@ function canonicalRowFrom(capi: CAPI, pointer: WasmPointer): ObservationRow {
     moving_state: stringOrNull(capi.sqlite3_column_text(pointer, 20)),
     moving_state_rank: numberFrom(capi.sqlite3_column_int(pointer, 21)),
     moving_state_revision: numberFrom(capi.sqlite3_column_double(pointer, 22)),
-    link_revision: numberFrom(capi.sqlite3_column_double(pointer, 23))
+    link_revision: numberFrom(capi.sqlite3_column_double(pointer, 23)),
   };
 }
 
@@ -869,34 +879,36 @@ function nullableColumnNumber(capi: CAPI, pointer: WasmPointer, index: number): 
 }
 
 function nullableColumnInteger(capi: CAPI, pointer: WasmPointer, index: number): number | null {
-  return capi.sqlite3_column_type(pointer, index) === capi.SQLITE_NULL
-    ? null
-    : capi.sqlite3_column_int(pointer, index);
+  return capi.sqlite3_column_type(pointer, index) === capi.SQLITE_NULL ? null : capi.sqlite3_column_int(pointer, index);
 }
 
 function canonicalObservationToSample(rows: ObservationRow[]): Record<string, unknown> {
-  const byLocation = [...rows].sort((lhs, rhs) =>
-    compareNumberDescending(lhs.location_quality, rhs.location_quality)
-      || compareNumberDescending(lhs.location_revision, rhs.location_revision)
-      || compareStringDescending(lhs.location_tie, rhs.location_tie)
-      || compareStringAscending(lhs.identity, rhs.identity)
+  const byLocation = [...rows].sort(
+    (lhs, rhs) =>
+      compareNumberDescending(lhs.location_quality, rhs.location_quality) ||
+      compareNumberDescending(lhs.location_revision, rhs.location_revision) ||
+      compareStringDescending(lhs.location_tie, rhs.location_tie) ||
+      compareStringAscending(lhs.identity, rhs.identity),
   );
-  const byActivity = [...rows].sort((lhs, rhs) =>
-    compareNumberDescending(lhs.activity_rank, rhs.activity_rank)
-      || compareNumberDescending(lhs.activity_revision, rhs.activity_revision)
-      || compareStringDescending(lhs.activity, rhs.activity)
-      || compareStringAscending(lhs.identity, rhs.identity)
+  const byActivity = [...rows].sort(
+    (lhs, rhs) =>
+      compareNumberDescending(lhs.activity_rank, rhs.activity_rank) ||
+      compareNumberDescending(lhs.activity_revision, rhs.activity_revision) ||
+      compareStringDescending(lhs.activity, rhs.activity) ||
+      compareStringAscending(lhs.identity, rhs.identity),
   );
-  const byMovingState = [...rows].sort((lhs, rhs) =>
-    compareNumberDescending(lhs.moving_state_rank, rhs.moving_state_rank)
-      || compareNumberDescending(lhs.moving_state_revision, rhs.moving_state_revision)
-      || compareStringDescending(lhs.moving_state, rhs.moving_state)
-      || compareStringAscending(lhs.identity, rhs.identity)
+  const byMovingState = [...rows].sort(
+    (lhs, rhs) =>
+      compareNumberDescending(lhs.moving_state_rank, rhs.moving_state_rank) ||
+      compareNumberDescending(lhs.moving_state_revision, rhs.moving_state_revision) ||
+      compareStringDescending(lhs.moving_state, rhs.moving_state) ||
+      compareStringAscending(lhs.identity, rhs.identity),
   );
-  const byLink = [...rows].sort((lhs, rhs) =>
-    compareNumberDescending(lhs.link_revision, rhs.link_revision)
-      || compareStringAscending(lhs.timeline_item_id, rhs.timeline_item_id)
-      || compareStringAscending(lhs.identity, rhs.identity)
+  const byLink = [...rows].sort(
+    (lhs, rhs) =>
+      compareNumberDescending(lhs.link_revision, rhs.link_revision) ||
+      compareStringAscending(lhs.timeline_item_id, rhs.timeline_item_id) ||
+      compareStringAscending(lhs.identity, rhs.identity),
   );
   const row: ObservationRow = { ...byLocation[0] };
   for (const field of [
@@ -907,14 +919,17 @@ function canonicalObservationToSample(rows: ObservationRow[]): Record<string, un
     "speed_accuracy",
     "course",
     "course_accuracy",
-    "timezone_offset"
+    "timezone_offset",
   ]) {
     row[field] = firstPresent(byLocation, field);
   }
-  row.sample_id = firstPresent([...rows].sort((lhs, rhs) =>
-    compareStringAscending(lhs.sample_id, rhs.sample_id)
-      || compareStringAscending(lhs.identity, rhs.identity)
-  ), "sample_id");
+  row.sample_id = firstPresent(
+    [...rows].sort(
+      (lhs, rhs) =>
+        compareStringAscending(lhs.sample_id, rhs.sample_id) || compareStringAscending(lhs.identity, rhs.identity),
+    ),
+    "sample_id",
+  );
   row.timeline_item_id = firstPresent(byLink, "timeline_item_id");
   row.activity = firstPresent(byActivity, "activity");
   row.activity_rank = byActivity[0]?.activity_rank ?? 0;
@@ -943,7 +958,7 @@ function compareStringDescending(lhs: ObservationRow[string], rhs: ObservationRo
 function observationRowToSample(row: ObservationRow): Record<string, unknown> {
   const ts = numberFrom(row.ts);
   const sample: Record<string, unknown> = {
-    date: new Date(ts * 1000).toISOString()
+    date: new Date(ts * 1000).toISOString(),
   };
   const lat = numberOrNull(row.lat);
   const lon = numberOrNull(row.lon);
@@ -951,7 +966,7 @@ function observationRowToSample(row: ObservationRow): Record<string, unknown> {
     const location: Record<string, unknown> = {
       timestamp: new Date(ts * 1000).toISOString(),
       latitude: lat,
-      longitude: lon
+      longitude: lon,
     };
     assignNumber(location, "altitude", row.altitude);
     assignNumber(location, "horizontalAccuracy", row.horizontal_accuracy);

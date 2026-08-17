@@ -2,7 +2,7 @@ const headers = {
   "Cross-Origin-Opener-Policy": "same-origin",
   "Cross-Origin-Embedder-Policy": "require-corp",
   "Cross-Origin-Resource-Policy": "same-origin",
-  "Origin-Agent-Cluster": "?1"
+  "Origin-Agent-Cluster": "?1",
 };
 
 export default {
@@ -18,7 +18,7 @@ export default {
     return new Response(response.body, {
       status: response.status,
       statusText: response.statusText,
-      headers: nextHeaders
+      headers: nextHeaders,
     });
-  }
+  },
 };

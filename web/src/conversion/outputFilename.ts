@@ -3,7 +3,10 @@ export function makeImportFilename(now = new Date()): string {
   return `path-import-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.db`;
 }
 
-export async function makeUniqueImportFilename(directory: FileSystemDirectoryHandle, preferred: string): Promise<string> {
+export async function makeUniqueImportFilename(
+  directory: FileSystemDirectoryHandle,
+  preferred: string,
+): Promise<string> {
   const extensionIndex = preferred.lastIndexOf(".");
   const stem = extensionIndex > 0 ? preferred.slice(0, extensionIndex) : preferred;
   const extension = extensionIndex > 0 ? preferred.slice(extensionIndex) : "";

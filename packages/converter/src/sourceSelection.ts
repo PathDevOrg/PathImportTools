@@ -7,7 +7,7 @@ const movesStorylinePatterns = [
   /\/json\/full\/storyline\.json(?:\.gz)?$/i,
   /\/json\/monthly\/storyline\//i,
   /\/json\/weekly\/storyline\//i,
-  /\/json\/yearly\/storyline\//i
+  /\/json\/yearly\/storyline\//i,
 ];
 
 export function classifySourcePath(path: string): SourceType | null {
@@ -16,10 +16,10 @@ export function classifySourcePath(path: string): SourceType | null {
   }
   const normalized = normalizedPath(path).toLowerCase();
   if (
-    normalized.includes("/export/json/daily/")
-    || normalized.includes("/export/json/monthly/")
-    || normalized.startsWith("/json/daily/")
-    || normalized.startsWith("/json/monthly/")
+    normalized.includes("/export/json/daily/") ||
+    normalized.includes("/export/json/monthly/") ||
+    normalized.startsWith("/json/daily/") ||
+    normalized.startsWith("/json/monthly/")
   ) {
     return "arc-export";
   }

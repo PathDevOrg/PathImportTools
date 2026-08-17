@@ -26,7 +26,9 @@ export function parseImportTimestamp(value: string | null | undefined): number |
     return utcMillis === null ? null : Math.floor(utcMillis / 1000);
   }
 
-  const iso = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(Z|[+-]\d{2}:?\d{2})?$/.exec(trimmed);
+  const iso = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(Z|[+-]\d{2}:?\d{2})?$/.exec(
+    trimmed,
+  );
   if (iso) {
     const [, year, month, day, hour, minute, second = "00", fraction = "", zone] = iso;
     const utcMillis = strictUtcMillis(year, month, day, hour, minute, second);
@@ -37,7 +39,7 @@ export function parseImportTimestamp(value: string | null | undefined): number |
     let offsetSeconds = 0;
     if (zone && zone !== "Z") {
       const offset = /^([+-])(\d{2}):?(\d{2})$/.exec(zone);
-      offsetSeconds = offset ? validOffsetSeconds(offset[1]!, offset[2]!, offset[3]!) ?? Number.NaN : Number.NaN;
+      offsetSeconds = offset ? (validOffsetSeconds(offset[1]!, offset[2]!, offset[3]!) ?? Number.NaN) : Number.NaN;
     }
     if (!Number.isFinite(offsetSeconds)) {
       return null;
@@ -49,11 +51,7 @@ export function parseImportTimestamp(value: string | null | undefined): number |
     return null;
   }
 
-  const parsed = Date.parse(trimmed);
-  if (Number.isNaN(parsed)) {
-    return null;
-  }
-  return Math.floor(parsed / 1000);
+  return null;
 }
 
 function strictUtcMillis(
@@ -62,29 +60,29 @@ function strictUtcMillis(
   day: string,
   hour: string,
   minute: string,
-  second: string
+  second: string,
 ): number | null {
   const components = [year, month, day, hour, minute, second].map(Number);
   const [yearValue, monthValue, dayValue, hourValue, minuteValue, secondValue] = components;
   if (
-    monthValue! < 1
-    || monthValue! > 12
-    || dayValue! < 1
-    || hourValue! > 23
-    || minuteValue! > 59
-    || secondValue! > 59
+    monthValue! < 1 ||
+    monthValue! > 12 ||
+    dayValue! < 1 ||
+    hourValue! > 23 ||
+    minuteValue! > 59 ||
+    secondValue! > 59
   ) {
     return null;
   }
   const date = new Date(0);
   date.setUTCFullYear(yearValue!, monthValue! - 1, dayValue!);
   date.setUTCHours(hourValue!, minuteValue!, secondValue!, 0);
-  return date.getUTCFullYear() === yearValue
-    && date.getUTCMonth() === monthValue! - 1
-    && date.getUTCDate() === dayValue
-    && date.getUTCHours() === hourValue
-    && date.getUTCMinutes() === minuteValue
-    && date.getUTCSeconds() === secondValue
+  return date.getUTCFullYear() === yearValue &&
+    date.getUTCMonth() === monthValue! - 1 &&
+    date.getUTCDate() === dayValue &&
+    date.getUTCHours() === hourValue &&
+    date.getUTCMinutes() === minuteValue &&
+    date.getUTCSeconds() === secondValue
     ? date.getTime()
     : null;
 }
@@ -106,7 +104,7 @@ export function extractTimezoneOffsetSeconds(value: string | null | undefined): 
 function validOffsetSeconds(sign: string, hours: string, minutes: string): number | null {
   const hour = Number(hours);
   const minute = Number(minutes);
-  if (hour > 14 || minute >= 60 || hour === 14 && minute > 0) {
+  if (hour > 14 || minute >= 60 || (hour === 14 && minute > 0)) {
     return null;
   }
   const offset = hour * 3600 + minute * 60;

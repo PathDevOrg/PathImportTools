@@ -10,7 +10,10 @@ export type SaveFilePickerHost = {
   }) => Promise<FileSystemFileHandle>;
 };
 
-export async function makeWorkerOutputTarget(host: SaveFilePickerHost, filename: string): Promise<WorkerOutputTarget | null> {
+export async function makeWorkerOutputTarget(
+  host: SaveFilePickerHost,
+  filename: string,
+): Promise<WorkerOutputTarget | null> {
   if (!host.showSaveFilePicker) {
     return { filename };
   }
@@ -22,10 +25,10 @@ export async function makeWorkerOutputTarget(host: SaveFilePickerHost, filename:
         {
           description: "SQLite database",
           accept: {
-            "application/vnd.sqlite3": [".db"]
-          }
-        }
-      ]
+            "application/vnd.sqlite3": [".db"],
+          },
+        },
+      ],
     });
     return { filename: saveHandle.name || filename, saveHandle };
   } catch (error) {

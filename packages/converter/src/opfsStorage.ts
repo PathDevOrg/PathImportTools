@@ -23,16 +23,25 @@ export async function acquireStorageLease(lockName: string): Promise<() => Promi
   }
   let release: (() => void) | null = null;
   let acquired: (() => void) | null = null;
+  let requestFailed = false;
   const acquiredPromise = new Promise<void>((resolve) => {
     acquired = resolve;
   });
-  const held = locks.request(lockName, async () => {
-    acquired?.();
-    await new Promise<void>((resolve) => {
-      release = resolve;
+  const held = locks
+    .request(lockName, async () => {
+      acquired?.();
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    })
+    .catch(() => {
+      requestFailed = true;
+      acquired?.();
     });
-  });
-  await acquiredPromise;
+  await Promise.race([acquiredPromise, held]);
+  if (requestFailed) {
+    return async () => undefined;
+  }
   let released = false;
   return async () => {
     if (released) {
@@ -48,7 +57,7 @@ export async function cleanupStaleDirectories(prefix: string, lockPrefix: string
   if (typeof navigator === "undefined" || !navigator.storage?.getDirectory) {
     return;
   }
-  const root = await navigator.storage.getDirectory() as EnumerableDirectoryHandle;
+  const root = (await navigator.storage.getDirectory()) as EnumerableDirectoryHandle;
   const cutoff = now - staleStorageAgeMs;
   const hasLocks = Boolean(webLocks());
   for await (const [name, handle] of root.entries()) {
@@ -75,7 +84,7 @@ export async function removeIfLeaseAvailable(lockName: string, remove: () => Pro
 export async function removeEntryIfPresent(
   directory: FileSystemDirectoryHandle,
   name: string,
-  recursive: boolean
+  recursive: boolean,
 ): Promise<void> {
   try {
     await directory.removeEntry(name, { recursive });

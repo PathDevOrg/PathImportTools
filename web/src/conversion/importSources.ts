@@ -1,5 +1,5 @@
+import { type ImportFileHandle, initialCrc32, updateCrc32 } from "@aura-importer/converter";
 import { Inflate } from "fflate";
-import { initialCrc32, updateCrc32, type ImportFileHandle } from "@aura-importer/converter";
 import type { WorkerFilePayload } from "./workerTypes";
 
 type ZipEntry = {
@@ -26,32 +26,38 @@ const zip64LocatorSignature = 0x07064b50;
 const uint32Max = 0xffffffff;
 const uint16Max = 0xffff;
 const readChunkSize = 256 * 1024;
+const gzipFooterStreamByteLimit = 16 * 1024 * 1024;
 
-export async function buildImportHandles(files: WorkerFilePayload[], onProgress?: (progress: BuildProgress) => void): Promise<ImportFileHandle[]> {
+export async function buildImportHandles(
+  files: WorkerFilePayload[],
+  onProgress?: (progress: BuildProgress) => void,
+  options: { signal?: AbortSignal } = {},
+): Promise<ImportFileHandle[]> {
   const entries: ImportFileHandle[] = [];
   let completed = 0;
   for (const payload of files) {
+    throwIfAborted(options.signal);
     onProgress?.({
       message: `Indexing ${payload.path}`,
       completed,
-      total: files.length
+      total: files.length,
     });
     if (payload.path.toLowerCase().endsWith(".zip")) {
-      entries.push(...await indexZipFile(payload.file));
+      entries.push(...(await indexZipFile(payload.file, options.signal)));
     } else {
       const size = await estimatedInputSize(payload.path, payload.file);
       entries.push({
         path: payload.path,
         size,
         readData: async () => new Uint8Array(await payload.file.arrayBuffer()),
-        readChunks: () => readBlobChunks(payload.file)
+        readChunks: () => readBlobChunks(payload.file),
       });
     }
     completed += 1;
     onProgress?.({
       message: `Indexed ${payload.path}`,
       completed,
-      total: files.length
+      total: files.length,
     });
   }
   return entries;
@@ -66,15 +72,16 @@ async function estimatedInputSize(path: string, file: File): Promise<number> {
   return Math.max(declaredSize, file.size * 4);
 }
 
-async function indexZipFile(file: File): Promise<ImportFileHandle[]> {
-  const directory = await readCentralDirectory(file);
+async function indexZipFile(file: File, signal?: AbortSignal): Promise<ImportFileHandle[]> {
+  const directory = await readCentralDirectory(file, signal);
   const handles: ImportFileHandle[] = [];
   for (const entry of directory) {
+    throwIfAborted(signal);
     handles.push({
       path: entry.path,
       size: await estimatedZipEntrySize(file, entry),
       readData: async () => readZipEntry(file, entry),
-      readChunks: () => readZipEntryChunks(file, entry)
+      readChunks: () => readZipEntryChunks(file, entry),
     });
   }
   return handles;
@@ -85,14 +92,19 @@ async function estimatedZipEntrySize(file: File, entry: ZipEntry): Promise<numbe
     return entry.uncompressedSize;
   }
   const declaredSize = await gzipDeclaredSize(file, entry);
-  return Math.max(declaredSize, entry.uncompressedSize * 4);
+  return Math.max(declaredSize ?? 0, entry.uncompressedSize * 4);
 }
 
-async function gzipDeclaredSize(file: File, entry: ZipEntry): Promise<number> {
+async function gzipDeclaredSize(file: File, entry: ZipEntry): Promise<number | null> {
   if (entry.compression === 0) {
     const dataOffset = await zipEntryDataOffset(file, entry);
-    const footer = new Uint8Array(await file.slice(dataOffset + entry.compressedSize - 4, dataOffset + entry.compressedSize).arrayBuffer());
+    const footer = new Uint8Array(
+      await file.slice(dataOffset + entry.compressedSize - 4, dataOffset + entry.compressedSize).arrayBuffer(),
+    );
     return readU32(footer, 0);
+  }
+  if (entry.compressedSize > gzipFooterStreamByteLimit) {
+    return null;
   }
   let footer = new Uint8Array(0);
   for await (const chunk of readZipEntryChunks(file, entry)) {
@@ -109,15 +121,18 @@ async function gzipDeclaredSize(file: File, entry: ZipEntry): Promise<number> {
 }
 
 async function zipEntryDataOffset(file: File, entry: ZipEntry): Promise<number> {
-  const localHeader = new Uint8Array(await file.slice(entry.localHeaderOffset, entry.localHeaderOffset + 30).arrayBuffer());
+  const localHeader = new Uint8Array(
+    await file.slice(entry.localHeaderOffset, entry.localHeaderOffset + 30).arrayBuffer(),
+  );
   if (readU32(localHeader, 0) !== zipLocalHeaderSignature) {
     throw new Error(`Invalid zip local header for ${entry.path}`);
   }
   return entry.localHeaderOffset + 30 + readU16(localHeader, 26) + readU16(localHeader, 28);
 }
 
-async function readCentralDirectory(file: File): Promise<ZipEntry[]> {
+async function readCentralDirectory(file: File, signal?: AbortSignal): Promise<ZipEntry[]> {
   const end = await findEndOfCentralDirectory(file);
+  throwIfAborted(signal);
   let totalEntries = readU16(end.bytes, end.offset + 10);
   let centralDirectorySize = readU32(end.bytes, end.offset + 12);
   let centralDirectoryOffset = readU32(end.bytes, end.offset + 16);
@@ -129,7 +144,10 @@ async function readCentralDirectory(file: File): Promise<ZipEntry[]> {
     centralDirectoryOffset = zip64.centralDirectoryOffset;
   }
 
-  const centralDirectory = new Uint8Array(await file.slice(centralDirectoryOffset, centralDirectoryOffset + centralDirectorySize).arrayBuffer());
+  const centralDirectory = new Uint8Array(
+    await file.slice(centralDirectoryOffset, centralDirectoryOffset + centralDirectorySize).arrayBuffer(),
+  );
+  throwIfAborted(signal);
   const entries: ZipEntry[] = [];
   let offset = 0;
   for (let index = 0; index < totalEntries && offset < centralDirectory.length; index += 1) {
@@ -152,7 +170,7 @@ async function readCentralDirectory(file: File): Promise<ZipEntry[]> {
       centralDirectory.subarray(extraStart, extraEnd),
       uncompressedSize32 === uint32Max,
       compressedSize32 === uint32Max,
-      localHeaderOffset32 === uint32Max
+      localHeaderOffset32 === uint32Max,
     );
     const uncompressedSize = zip64Values.uncompressedSize ?? uncompressedSize32;
     const compressedSize = zip64Values.compressedSize ?? compressedSize32;
@@ -166,7 +184,9 @@ async function readCentralDirectory(file: File): Promise<ZipEntry[]> {
   return entries;
 }
 
-async function findEndOfCentralDirectory(file: File): Promise<{ bytes: Uint8Array; offset: number; absoluteOffset: number }> {
+async function findEndOfCentralDirectory(
+  file: File,
+): Promise<{ bytes: Uint8Array; offset: number; absoluteOffset: number }> {
   const tailLength = Math.min(file.size, 66_000);
   const tailStart = file.size - tailLength;
   const bytes = new Uint8Array(await file.slice(tailStart).arrayBuffer());
@@ -180,7 +200,7 @@ async function findEndOfCentralDirectory(file: File): Promise<{ bytes: Uint8Arra
 
 async function readZip64CentralDirectoryInfo(
   file: File,
-  endOffset: number
+  endOffset: number,
 ): Promise<{ totalEntries: number; centralDirectorySize: number; centralDirectoryOffset: number }> {
   const locatorOffset = endOffset - 20;
   if (locatorOffset < 0) {
@@ -198,7 +218,7 @@ async function readZip64CentralDirectoryInfo(
   return {
     totalEntries: readU64(record, 32),
     centralDirectorySize: readU64(record, 40),
-    centralDirectoryOffset: readU64(record, 48)
+    centralDirectoryOffset: readU64(record, 48),
   };
 }
 
@@ -206,7 +226,7 @@ function parseZip64Extra(
   extra: Uint8Array,
   needsUncompressedSize: boolean,
   needsCompressedSize: boolean,
-  needsLocalHeaderOffset: boolean
+  needsLocalHeaderOffset: boolean,
 ): { uncompressedSize?: number; compressedSize?: number; localHeaderOffset?: number } {
   const values: { uncompressedSize?: number; compressedSize?: number; localHeaderOffset?: number } = {};
   let offset = 0;
@@ -316,6 +336,12 @@ async function* readBlobChunks(blob: Blob): AsyncGenerator<Uint8Array> {
 
 function normalizeZipPath(path: string): string {
   return path.replaceAll("\\", "/").replace(/^\/+/, "");
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new DOMException("The operation was cancelled", "AbortError");
+  }
 }
 
 function readU16(bytes: Uint8Array, offset: number): number {

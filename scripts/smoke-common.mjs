@@ -5,11 +5,15 @@ import { chromium } from "playwright";
 export async function withPreview(port, run) {
   const baseUrl = `http://127.0.0.1:${port}`;
   const preview = spawn("npm", ["run", "preview", "-w", "@aura-importer/web", "--", "--port", String(port)], {
-    stdio: ["ignore", "pipe", "pipe"]
+    stdio: ["ignore", "pipe", "pipe"],
   });
   let output = "";
-  preview.stdout.on("data", (chunk) => { output += chunk.toString(); });
-  preview.stderr.on("data", (chunk) => { output += chunk.toString(); });
+  preview.stdout.on("data", (chunk) => {
+    output += chunk.toString();
+  });
+  preview.stderr.on("data", (chunk) => {
+    output += chunk.toString();
+  });
 
   try {
     await waitForServer();

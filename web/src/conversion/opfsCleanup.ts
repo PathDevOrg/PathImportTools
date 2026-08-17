@@ -1,11 +1,11 @@
 import {
   acquireStorageLease,
   cleanupStaleDirectories,
+  type EnumerableDirectoryHandle,
   removeEntryIfPresent,
   removeIfLeaseAvailable,
   staleStorageAgeMs,
   timestampFromName,
-  type EnumerableDirectoryHandle
 } from "@aura-importer/converter";
 
 let cleanupPromise: Promise<void> | null = null;
@@ -31,7 +31,7 @@ async function cleanupStaleImporterStorageOnce(now: number): Promise<void> {
 }
 
 async function cleanupOutputDirectory(now: number): Promise<void> {
-  const root = await navigator.storage.getDirectory() as EnumerableDirectoryHandle;
+  const root = (await navigator.storage.getDirectory()) as EnumerableDirectoryHandle;
   let directory: FileSystemDirectoryHandle;
   try {
     directory = await root.getDirectoryHandle("aura-importer-output");
@@ -45,7 +45,9 @@ async function cleanupOutputDirectory(now: number): Promise<void> {
   for await (const [name] of (directory as EnumerableDirectoryHandle).entries()) {
     const timestamp = timestampFromName(name);
     if (timestamp !== null && timestamp < cutoff) {
-      await removeIfLeaseAvailable(`aura-importer-temp:output/${name}`, () => removeEntryIfPresent(directory, name, true));
+      await removeIfLeaseAvailable(`aura-importer-temp:output/${name}`, () =>
+        removeEntryIfPresent(directory, name, true),
+      );
     }
   }
 }

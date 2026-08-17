@@ -54,18 +54,13 @@ const activityMap = new Map<string, MoveMode>([
   ["flight", "airplane"],
   ["airplane", "airplane"],
   ["plane", "airplane"],
-  ["aircraft", "airplane"]
+  ["aircraft", "airplane"],
 ]);
 
 export function mapActivityType(value: string | null | undefined): MoveMode {
   if (!value) {
     return "other";
   }
-  const key = value
-    .trim()
-    .toLowerCase()
-    .replaceAll("-", "_")
-    .replaceAll(" ", "_")
-    .replaceAll("/", "_");
+  const key = value.trim().toLowerCase().replaceAll("-", "_").replaceAll(" ", "_").replaceAll("/", "_");
   return activityMap.get(key) ?? "other";
 }

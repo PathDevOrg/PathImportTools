@@ -26,12 +26,15 @@ async function runMockedDirectoryCheck(baseUrl) {
         throw new DOMException("File not found", "NotFoundError");
       },
       entries: async function* () {
-        yield ["storyline.json", {
-          kind: "file",
-          name: "storyline.json",
-          getFile: async () => new File(["{}"], "storyline.json", { type: "application/json" })
-        }];
-      }
+        yield [
+          "storyline.json",
+          {
+            kind: "file",
+            name: "storyline.json",
+            getFile: async () => new File(["{}"], "storyline.json", { type: "application/json" }),
+          },
+        ];
+      },
     });
     class MockWorker {
       constructor() {
@@ -40,22 +43,34 @@ async function runMockedDirectoryCheck(baseUrl) {
 
       postMessage(request) {
         if (request.type === "scan") {
-          setTimeout(() => this.onmessage?.({ data: {
-            id: request.id,
-            type: "scan-complete",
-            scan: { totalFileCount: 1, supportedFileCount: 1, bySource: [] }
-          } }), 10);
+          setTimeout(
+            () =>
+              this.onmessage?.({
+                data: {
+                  id: request.id,
+                  type: "scan-complete",
+                  scan: { totalFileCount: 1, supportedFileCount: 1, bySource: [] },
+                },
+              }),
+            10,
+          );
         } else {
           window.__lastOutput = request.output;
-          setTimeout(() => this.onmessage?.({ data: {
-            id: request.id,
-            type: "convert-complete",
-            filename: request.output.filename,
-            size: 3,
-            savedToDisk: Boolean(request.output.saveHandle),
-            report: {},
-            diagnostics: []
-          } }), 10);
+          setTimeout(
+            () =>
+              this.onmessage?.({
+                data: {
+                  id: request.id,
+                  type: "convert-complete",
+                  filename: request.output.filename,
+                  size: 3,
+                  savedToDisk: Boolean(request.output.saveHandle),
+                  report: {},
+                  diagnostics: [],
+                },
+              }),
+            10,
+          );
         }
       }
 
@@ -73,7 +88,7 @@ async function runMockedDirectoryCheck(baseUrl) {
     outputName: window.__lastOutput?.filename,
     hasSaveHandle: Boolean(window.__lastOutput?.saveHandle),
     appStoreHref: document.querySelector(".app-store-badge")?.href,
-    body: document.body.innerText
+    body: document.body.innerText,
   }));
   await page.screenshot({ path: "/tmp/path-import-smoke.png", fullPage: true });
   await browser.close();
@@ -84,7 +99,10 @@ async function runMockedDirectoryCheck(baseUrl) {
   if (result.savePickerCalled || !result.hasSaveHandle || !result.outputName?.endsWith(".db")) {
     throw new Error(JSON.stringify(result, null, 2));
   }
-  if (result.appStoreHref !== "https://apps.apple.com/app/id6758724528" || !result.body.includes("No upload")) {
+  if (
+    result.appStoreHref !== "https://apps.apple.com/app/id6758724528" ||
+    !result.body.includes("designed to work offline")
+  ) {
     throw new Error(JSON.stringify(result, null, 2));
   }
 }
@@ -97,24 +115,26 @@ async function runActualConversionCheck(baseUrl) {
   });
 
   const archive = zipSync({
-    "Export/JSON/Daily/2024-05-01.json": strToU8(JSON.stringify({
-      timelineItems: [
-        {
-          isVisit: false,
-          startDate: "2024-05-01T10:00:00Z",
-          endDate: "2024-05-01T10:20:00Z",
-          activityType: "walk",
-          samples: [
-            {
-              date: "2024-05-01T10:00:00Z",
-              latitude: -33.8688,
-              longitude: 151.2093,
-              horizontalAccuracy: 8
-            }
-          ]
-        }
-      ]
-    }))
+    "Export/JSON/Daily/2024-05-01.json": strToU8(
+      JSON.stringify({
+        timelineItems: [
+          {
+            isVisit: false,
+            startDate: "2024-05-01T10:00:00Z",
+            endDate: "2024-05-01T10:20:00Z",
+            activityType: "walk",
+            samples: [
+              {
+                date: "2024-05-01T10:00:00Z",
+                latitude: -33.8688,
+                longitude: 151.2093,
+                horizontalAccuracy: 8,
+              },
+            ],
+          },
+        ],
+      }),
+    ),
   });
 
   await page.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 15_000 });
@@ -127,7 +147,7 @@ async function runActualConversionCheck(baseUrl) {
   await page.locator("input[type=file]").setInputFiles({
     name: "arc-export.zip",
     mimeType: "application/zip",
-    buffer: Buffer.from(archive)
+    buffer: Buffer.from(archive),
   });
   await page.getByText("Import file ready").waitFor({ timeout: 20_000 });
   await page.getByText("Download again").waitFor({ timeout: 5_000 });

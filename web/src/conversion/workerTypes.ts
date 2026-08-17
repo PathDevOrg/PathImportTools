@@ -13,21 +13,26 @@ export type WorkerOutputTarget = {
 
 export type WorkerRequest =
   | {
-    id: string;
-    type: "scan";
-    files: WorkerFilePayload[];
-  }
+      id: string;
+      type: "scan";
+      files: WorkerFilePayload[];
+    }
   | {
-    id: string;
-    type: "convert";
-    files: WorkerFilePayload[];
-    output: WorkerOutputTarget;
-  }
+      id: string;
+      type: "convert";
+      files: WorkerFilePayload[];
+      output: WorkerOutputTarget;
+    }
   | {
-    id: string;
-    type: "release-output";
-    outputToken: string;
-  };
+      id: string;
+      type: "release-output";
+      outputToken: string;
+    }
+  | {
+      id: string;
+      type: "cancel";
+      requestId: string;
+    };
 
 export type WorkerProgress = {
   phase: ImportProgressPhase | "index" | "schema" | "write" | "verify" | "export";
@@ -38,28 +43,28 @@ export type WorkerProgress = {
 
 export type WorkerResponse =
   | {
-    id: string;
-    type: "progress";
-    message: string;
-    progress: WorkerProgress;
-  }
+      id: string;
+      type: "progress";
+      message: string;
+      progress: WorkerProgress;
+    }
   | {
-    id: string;
-    type: "scan-complete";
-    scan: ImportScan;
-  }
+      id: string;
+      type: "scan-complete";
+      scan: ImportScan;
+    }
   | {
-    id: string;
-    type: "convert-complete";
-    filename: string;
-    savedToDisk: boolean;
-    diagnostics: string[];
-    bytes?: Uint8Array;
-    file?: File;
-    outputToken?: string;
-  }
+      id: string;
+      type: "convert-complete";
+      filename: string;
+      savedToDisk: boolean;
+      diagnostics: string[];
+      bytes?: Uint8Array;
+      file?: File;
+      outputToken?: string;
+    }
   | {
-    id: string;
-    type: "error";
-    message: string;
-  };
+      id: string;
+      type: "error";
+      message: string;
+    };

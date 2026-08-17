@@ -2,9 +2,6 @@ import { readFileSync } from "node:fs";
 import { zipSync } from "fflate";
 import { openPage, withPreview } from "./smoke-common.mjs";
 
-const monthlyGzPath = process.env.ARC_MONTHLY_GZ
-  ?? "/Users/apple/Documents/Aura/PathTools/movesarc/Export/JSON/Monthly/2024-05.json.gz";
-
 await withPreview(4176, async (baseUrl) => {
   const gzBytes = readFileSync(monthlyGzPath);
   if (gzBytes.length < 10_000_000) {
@@ -12,7 +9,7 @@ await withPreview(4176, async (baseUrl) => {
   }
 
   const archive = zipSync({
-    "Export/JSON/Monthly/2024-05.json.gz": [gzBytes, { level: 0 }]
+    "Export/JSON/Monthly/2024-05.json.gz": [gzBytes, { level: 0 }],
   });
 
   const { browser, page, errors } = await openPage();
@@ -30,7 +27,7 @@ await withPreview(4176, async (baseUrl) => {
   await page.locator("input[type=file]").setInputFiles({
     name: "arc-monthly.zip",
     mimeType: "application/zip",
-    buffer: Buffer.from(archive)
+    buffer: Buffer.from(archive),
   });
   await page.getByText("Import file ready").waitFor({ timeout: 120_000 });
   await page.getByText("Download again").waitFor({ timeout: 30_000 });

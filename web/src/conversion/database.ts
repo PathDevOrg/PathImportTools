@@ -1,13 +1,15 @@
-import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
+import sqliteWasmBinary from "virtual:sqlite-wasm-binary";
 import {
   type AuraRows,
   type ConversionResult,
+  progressReportInterval,
   type StreamableAuraRows,
   type StreamableAuraTable,
-  type TimelineIntegritySummary
+  type TimelineIntegritySummary,
 } from "@aura-importer/converter";
-import { pathSchema } from "./schemaMigrations";
+import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
 import { acquireImporterStorageLease, cleanupStaleImporterStorage } from "./opfsCleanup";
+import { pathSchema } from "./schemaMigrations";
 
 type DatabaseProgress = {
   phase: "schema" | "write" | "verify" | "export";
@@ -34,7 +36,7 @@ export type AuraDatabaseWriter = {
   outputMode: "direct-save" | "opfs-download" | "buffered";
   writeRows: <T extends StreamableAuraTable>(table: T, rows: StreamableAuraRows[T]) => void;
   finish: (result: ConversionResult) => Promise<DatabaseOutput>;
-  abort: () => void;
+  abort: () => Promise<void>;
 };
 
 type SqliteDatabase = {
@@ -57,8 +59,17 @@ type SqlitePool = {
   removeVfs: () => Promise<boolean>;
 };
 
+type SqliteInitOptions = {
+  locateFile?: (file: string) => string;
+  wasmBinary?: Uint8Array;
+};
+
 type SqliteModule = {
-  installOpfsSAHPoolVfs?: (options: { name: string; directory: string; initialCapacity: number }) => Promise<SqlitePool>;
+  installOpfsSAHPoolVfs?: (options: {
+    name: string;
+    directory: string;
+    initialCapacity: number;
+  }) => Promise<SqlitePool>;
   opfs?: {
     getDirForFilename: (filename: string, createDirs?: boolean) => Promise<[FileSystemDirectoryHandle, string]>;
   };
@@ -72,12 +83,18 @@ const integrityCheckByteLimit = 512 * 1024 * 1024;
 const bufferedExportByteLimit = 512 * 1024 * 1024;
 const exportProgressChunkBytes = 8 * 1024 * 1024;
 
-const insertPlans: {
-  [K in keyof AuraRows]: {
-    table: K;
-    columns: string[];
-  }
-}[keyof AuraRows][] = [
+type TablePlan<K extends keyof AuraRows = keyof AuraRows> = {
+  table: K;
+  columns: ReadonlyArray<keyof AuraRows[K][number] & string>;
+};
+
+type AnyTablePlan = {
+  [K in keyof AuraRows]: TablePlan<K>;
+}[keyof AuraRows];
+
+type InsertStatements = Map<keyof AuraRows, SqliteStatement>;
+
+const insertPlans = [
   {
     table: "pois",
     columns: [
@@ -99,16 +116,16 @@ const insertPlans: {
       "sub_locality",
       "administrative_area",
       "postal_code",
-      "country"
-    ]
+      "country",
+    ],
   },
   {
     table: "stays",
-    columns: ["id", "start_ts", "end_ts", "centroid_lat", "centroid_lon", "radius_m", "type", "poi_id", "tz_offset_s"]
+    columns: ["id", "start_ts", "end_ts", "centroid_lat", "centroid_lon", "radius_m", "type", "poi_id", "tz_offset_s"],
   },
   {
     table: "moves",
-    columns: ["id", "start_ts", "end_ts", "mode", "distance_m", "tz_offset_s", "provider"]
+    columns: ["id", "start_ts", "end_ts", "mode", "distance_m", "tz_offset_s", "provider"],
   },
   {
     table: "raw_gps",
@@ -126,8 +143,8 @@ const insertPlans: {
       "course_acc_deg",
       "tz_offset_s",
       "provider",
-      "is_simulated"
-    ]
+      "is_simulated",
+    ],
   },
   {
     table: "samples",
@@ -147,8 +164,8 @@ const insertPlans: {
       "source_kind",
       "flags",
       "step_delta",
-      "tz_offset_s"
-    ]
+      "tz_offset_s",
+    ],
   },
   {
     table: "raw_motion_activity",
@@ -163,20 +180,30 @@ const insertPlans: {
       "is_cycling",
       "is_on_foot",
       "is_unknown",
-      "tz_offset_s"
-    ]
+      "tz_offset_s",
+    ],
   },
   {
     table: "raw_pedometer",
-    columns: ["id", "ts", "steps_delta", "distance_m", "cadence_spm", "pace_s_per_m", "floors_up", "floors_down", "tz_offset_s"]
+    columns: [
+      "id",
+      "ts",
+      "steps_delta",
+      "distance_m",
+      "cadence_spm",
+      "pace_s_per_m",
+      "floors_up",
+      "floors_down",
+      "tz_offset_s",
+    ],
   },
   {
     table: "raw_visits",
-    columns: ["id", "arrival_ts", "departure_ts", "lat", "lon", "horizontal_acc_m", "tz_offset_s"]
+    columns: ["id", "arrival_ts", "departure_ts", "lat", "lon", "horizontal_acc_m", "tz_offset_s"],
   },
   {
     table: "no_data_gaps",
-    columns: ["id", "start_ts", "end_ts", "reason", "uncertainty", "notes"]
+    columns: ["id", "start_ts", "end_ts", "reason", "uncertainty", "notes"],
   },
   {
     table: "route_paths",
@@ -195,49 +222,61 @@ const insertPlans: {
       "bbox_min_lon",
       "bbox_max_lat",
       "bbox_max_lon",
-      "lod_level"
-    ]
+      "lod_level",
+    ],
   },
   {
     table: "stay_pois",
-    columns: ["stay_id", "poi_id", "role", "distance_m"]
-  }
-];
+    columns: ["stay_id", "poi_id", "role", "distance_m"],
+  },
+] as const satisfies readonly AnyTablePlan[];
 
 export async function createAuraDatabaseWriter(
   onProgress: (progress: DatabaseProgress) => void,
-  target: DatabaseOutputTarget
+  target: DatabaseOutputTarget,
+  options: { signal?: AbortSignal } = {},
 ): Promise<AuraDatabaseWriter> {
-  const sqlite3 = await sqlite3InitModule() as SqliteModule;
+  throwIfAborted(options.signal);
+  const initializeSqlite = sqlite3InitModule as unknown as (options?: SqliteInitOptions) => Promise<SqliteModule>;
+  const useStableWasmPath = typeof location !== "undefined" && location.protocol.startsWith("http");
+  const sqlite3 = useStableWasmPath
+    ? await initializeSqlite({ locateFile: () => "/sqlite3.wasm", wasmBinary: sqliteWasmBinary })
+    : await initializeSqlite();
   await cleanupStaleImporterStorage();
   const canUseCanonicalOpfs = Boolean((target.saveHandle || target.opfsDownload) && sqlite3.oo1.OpfsDb && sqlite3.opfs);
-  const outputMode: AuraDatabaseWriter["outputMode"] = target.saveHandle && canUseCanonicalOpfs
-    ? "direct-save"
-    : target.opfsDownload && canUseCanonicalOpfs
-      ? "opfs-download"
-      : "buffered";
+  const outputMode: AuraDatabaseWriter["outputMode"] =
+    target.saveHandle && canUseCanonicalOpfs
+      ? "direct-save"
+      : target.opfsDownload && canUseCanonicalOpfs
+        ? "opfs-download"
+        : "buffered";
 
-  const internalFilename = canUseCanonicalOpfs ? `/aura-importer-output/${Date.now()}-${Math.round(Math.random() * 100000)}-${target.filename}` : `/aura-import-${Date.now()}-${Math.round(Math.random() * 100000)}.db`;
+  const internalFilename = canUseCanonicalOpfs
+    ? `/aura-importer-output/${Date.now()}-${Math.round(Math.random() * 100000)}-${target.filename}`
+    : `/aura-import-${Date.now()}-${Math.round(Math.random() * 100000)}.db`;
   const OpfsDb = sqlite3.oo1.OpfsDb;
   const poolId = `${Date.now()}-${Math.round(Math.random() * 100000)}`;
-  const storageLease = await acquireImporterStorageLease(canUseCanonicalOpfs
-    ? `output/${internalFilename.split("/").at(-1)!}`
-    : `pool/aura-importer-${poolId}`);
+  const storageLease = await acquireImporterStorageLease(
+    canUseCanonicalOpfs ? `output/${internalFilename.split("/").at(-1)!}` : `pool/aura-importer-${poolId}`,
+  );
   let initializingPool: SqlitePool | null = null;
   const initialized = await (async () => {
     try {
-      initializingPool = canUseCanonicalOpfs ? null : sqlite3.installOpfsSAHPoolVfs
-        ? await sqlite3.installOpfsSAHPoolVfs({
-          name: `aura-importer-${poolId}`,
-          directory: `/aura-importer-${poolId}`,
-          initialCapacity: 8
-        })
-        : null;
-      const db = canUseCanonicalOpfs && OpfsDb
-        ? new OpfsDb(internalFilename, "cw")
-        : initializingPool
-          ? new initializingPool.OpfsSAHPoolDb(internalFilename)
-          : new sqlite3.oo1.DB(":memory:", "c");
+      initializingPool = canUseCanonicalOpfs
+        ? null
+        : sqlite3.installOpfsSAHPoolVfs
+          ? await sqlite3.installOpfsSAHPoolVfs({
+              name: `aura-importer-${poolId}`,
+              directory: `/aura-importer-${poolId}`,
+              initialCapacity: 8,
+            })
+          : null;
+      const db =
+        canUseCanonicalOpfs && OpfsDb
+          ? new OpfsDb(internalFilename, "cw")
+          : initializingPool
+            ? new initializingPool.OpfsSAHPoolDb(internalFilename)
+            : new sqlite3.oo1.DB(":memory:", "c");
       return { pool: initializingPool, db };
     } catch (error) {
       try {
@@ -254,7 +293,7 @@ export async function createAuraDatabaseWriter(
     }
   })();
   const { pool, db } = initialized;
-  let statements: Map<keyof AuraRows, SqliteStatement> | null = null;
+  let statements: InsertStatements | null = null;
   let closed = false;
   let finished = false;
   let statementsFinalized = false;
@@ -322,17 +361,19 @@ export async function createAuraDatabaseWriter(
   return {
     outputMode,
     writeRows: (table, rows) => {
+      throwIfAborted(options.signal);
       if (!statements) {
         throw new Error("Database writer is not ready");
       }
-      insertTableRows(statements, tablePlan(table), rows as Array<Record<string, unknown>>);
+      insertTableRows(statements, tablePlan(table), rows);
     },
     finish: async (result) => {
       try {
+        throwIfAborted(options.signal);
         if (!statements) {
           throw new Error("Database writer is not ready");
         }
-        insertRowsWithStatements(statements, result.rows, onProgress);
+        insertRowsWithStatements(statements, result.rows, onProgress, options.signal);
         insertSchemaRecord(db);
         finalizeStatements();
         db.exec("COMMIT");
@@ -364,7 +405,7 @@ export async function createAuraDatabaseWriter(
 
         if (target.saveHandle && canUseCanonicalOpfs) {
           closeDb();
-          await saveOpfsFile(sqlite3, internalFilename, target.saveHandle, onProgress);
+          await saveOpfsFile(sqlite3, internalFilename, target.saveHandle, onProgress, options.signal);
           await cleanupStorage();
           finished = true;
           return { filename: target.filename, savedToDisk: true };
@@ -380,29 +421,37 @@ export async function createAuraDatabaseWriter(
             filename: target.filename,
             savedToDisk: false,
             file,
-            release: releaseStorageLease
+            release: releaseStorageLease,
           };
         }
 
         onProgress({ phase: "export", message: "Exporting database file", completed: 0, total: 1 });
         if (estimatedBytes > bufferedExportByteLimit) {
-          throw new Error("This database is too large for this browser's buffered download. Use a current desktop browser with disk-backed OPFS or direct file saving.");
+          throw new Error(
+            "This database is too large for this browser's buffered download. Use a current desktop browser with disk-backed OPFS or direct file saving.",
+          );
         }
+        let bytes: Uint8Array;
         if (pool) {
           closeDb();
-          const bytes = await pool.exportFile(internalFilename);
-          await cleanupStorage();
-          onProgress({ phase: "export", message: "Database file exported", completed: 1, total: 1 });
-          finished = true;
-          return { filename: target.filename, savedToDisk: false, bytes };
+          bytes = await pool.exportFile(internalFilename);
+        } else {
+          const fallback = sqlite3 as unknown as { capi?: { sqlite3_js_db_export?: (pointer: unknown) => Uint8Array } };
+          const pointer = (db as unknown as { pointer: unknown }).pointer;
+          const exported = fallback.capi?.sqlite3_js_db_export?.(pointer);
+          if (!exported) {
+            throw new Error("This browser cannot export the in-memory SQLite database");
+          }
+          bytes = exported;
         }
 
-        const fallback = sqlite3 as unknown as { capi?: { sqlite3_js_db_export?: (pointer: unknown) => Uint8Array } };
-        const pointer = (db as unknown as { pointer: unknown }).pointer;
-        const bytes = fallback.capi?.sqlite3_js_db_export?.(pointer);
-        if (!bytes) {
-          throw new Error("This browser cannot export the in-memory SQLite database");
+        if (target.saveHandle) {
+          await saveBytesToFile(target.saveHandle, bytes, onProgress, options.signal);
+          await cleanupStorage();
+          finished = true;
+          return { filename: target.filename, savedToDisk: true };
         }
+
         await cleanupStorage();
         onProgress({ phase: "export", message: "Database file exported", completed: 1, total: 1 });
         finished = true;
@@ -417,7 +466,7 @@ export async function createAuraDatabaseWriter(
         throw error;
       }
     },
-    abort: () => {
+    abort: async () => {
       if (finished) {
         return;
       }
@@ -431,8 +480,8 @@ export async function createAuraDatabaseWriter(
         transactionOpen = false;
       }
       closeDb();
-      void cleanupStorage();
-    }
+      await cleanupStorage();
+    },
   };
 }
 
@@ -461,7 +510,8 @@ async function saveOpfsFile(
   sqlite3: SqliteModule,
   filename: string,
   saveHandle: FileSystemFileHandle,
-  onProgress: (progress: DatabaseProgress) => void
+  onProgress: (progress: DatabaseProgress) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (!sqlite3.opfs) {
     throw new Error("OPFS output is not available in this browser.");
@@ -480,6 +530,7 @@ async function saveOpfsFile(
     let completedBytes = 0;
     let completedUnits = 0;
     while (true) {
+      throwIfAborted(signal);
       const { done, value } = await reader.read();
       if (done) {
         break;
@@ -520,7 +571,9 @@ function numberSelect(db: SqliteDatabase, sql: string): number {
 function verifyPersistedTimeline(db: SqliteDatabase, expected: TimelineIntegritySummary): void {
   const actual: TimelineIntegritySummary = {
     eventCount: numberSelect(db, "SELECT COUNT(*) FROM timeline_events"),
-    duplicateStartCount: numberSelect(db, `
+    duplicateStartCount: numberSelect(
+      db,
+      `
       SELECT COUNT(*)
       FROM (
         SELECT start_ts
@@ -528,8 +581,11 @@ function verifyPersistedTimeline(db: SqliteDatabase, expected: TimelineIntegrity
         GROUP BY start_ts
         HAVING COUNT(*) > 1
       )
-    `),
-    overlapCount: numberSelect(db, `
+    `,
+    ),
+    overlapCount: numberSelect(
+      db,
+      `
       WITH ordered AS (
         SELECT
           start_ts,
@@ -543,8 +599,11 @@ function verifyPersistedTimeline(db: SqliteDatabase, expected: TimelineIntegrity
       FROM ordered
       WHERE previous_max_end IS NOT NULL
         AND start_ts < previous_max_end
-    `),
-    adjacentSameKindCount: numberSelect(db, `
+    `,
+    ),
+    adjacentSameKindCount: numberSelect(
+      db,
+      `
       WITH ordered AS (
         SELECT kind, LAG(kind) OVER (ORDER BY start_ts) AS previous_kind
         FROM timeline_events
@@ -553,9 +612,12 @@ function verifyPersistedTimeline(db: SqliteDatabase, expected: TimelineIntegrity
       FROM ordered
       WHERE kind <> 'move'
         AND kind = previous_kind
-    `),
+    `,
+    ),
     openEventCount: numberSelect(db, "SELECT COUNT(*) FROM timeline_events WHERE end_ts IS NULL"),
-    openEventNotLastCount: numberSelect(db, `
+    openEventNotLastCount: numberSelect(
+      db,
+      `
       SELECT COUNT(*)
       FROM timeline_events current
       WHERE current.end_ts IS NULL
@@ -564,58 +626,76 @@ function verifyPersistedTimeline(db: SqliteDatabase, expected: TimelineIntegrity
           FROM timeline_events later
           WHERE later.start_ts > current.start_ts
         )
-    `),
-    nonPositiveDurationCount: numberSelect(db, "SELECT COUNT(*) FROM timeline_events WHERE end_ts IS NOT NULL AND end_ts <= start_ts")
+    `,
+    ),
+    nonPositiveDurationCount: numberSelect(
+      db,
+      "SELECT COUNT(*) FROM timeline_events WHERE end_ts IS NOT NULL AND end_ts <= start_ts",
+    ),
   };
-  const projectionMismatchCount = numberSelect(db, `
+  const projectionMismatchCount = numberSelect(
+    db,
+    `
     SELECT
       ABS((SELECT COUNT(*) FROM timeline_events) - (
         (SELECT COUNT(*) FROM stays)
         + (SELECT COUNT(*) FROM moves)
         + (SELECT COUNT(*) FROM no_data_gaps)
       ))
-  `);
+  `,
+  );
   if (projectionMismatchCount > 0 || JSON.stringify(actual) !== JSON.stringify(expected)) {
-    throw new Error(`SQLite timeline verification failed: expected=${JSON.stringify(expected)} actual=${JSON.stringify(actual)} projectionMismatchCount=${projectionMismatchCount}`);
+    throw new Error(
+      `SQLite timeline verification failed: expected=${JSON.stringify(expected)} actual=${JSON.stringify(actual)} projectionMismatchCount=${projectionMismatchCount}`,
+    );
   }
 }
 
-function makeInsertStatements(db: SqliteDatabase): Map<keyof AuraRows, SqliteStatement> {
+function makeInsertStatements(db: SqliteDatabase): InsertStatements {
   const statements = new Map<keyof AuraRows, SqliteStatement>();
   for (const plan of insertPlans) {
     const placeholders = plan.columns.map(() => "?").join(", ");
-    statements.set(plan.table, db.prepare(`INSERT INTO ${plan.table} (${plan.columns.join(", ")}) VALUES (${placeholders})`));
+    statements.set(
+      plan.table,
+      db.prepare(`INSERT INTO ${plan.table} (${plan.columns.join(", ")}) VALUES (${placeholders})`),
+    );
   }
   return statements;
 }
 
-function insertRowsWithStatements(statements: Map<keyof AuraRows, SqliteStatement>, rows: AuraRows, onProgress: (progress: DatabaseProgress) => void): void {
+function insertRowsWithStatements(
+  statements: InsertStatements,
+  rows: AuraRows,
+  onProgress: (progress: DatabaseProgress) => void,
+  signal?: AbortSignal,
+): void {
   const total = Object.values(rows).reduce((sum, tableRows) => sum + tableRows.length, 0);
   let completed = 0;
-  const insertRow = (plan: { table: keyof AuraRows; columns: string[] }, row: Record<string, unknown>): void => {
+  const insertRow = <K extends keyof AuraRows>(plan: TablePlan<K>, row: AuraRows[K][number]): void => {
+    throwIfAborted(signal);
     insertRowWithStatements(statements, plan, row);
     completed += 1;
-    if (completed === total || completed % 500 === 0) {
+    if (completed === total || completed % progressReportInterval === 0) {
       onProgress({ phase: "write", message: `Building ${plan.table}`, completed, total });
     }
   };
 
-  insertTableRows(statements, tablePlan("pois"), rows.pois as Array<Record<string, unknown>>, insertRow);
+  insertTableRows(statements, tablePlan("pois"), rows.pois, insertRow);
   insertSemanticRows(rows, insertRow);
 
   for (const plan of insertPlans) {
     if (plan.table === "pois" || plan.table === "stays" || plan.table === "moves" || plan.table === "no_data_gaps") {
       continue;
     }
-    insertTableRows(statements, plan, rows[plan.table] as Array<Record<string, unknown>>, insertRow);
+    insertTableRows(statements, tablePlan(plan.table), rows[plan.table] as AuraRows[typeof plan.table]);
   }
 }
 
-function insertTableRows(
-  statements: Map<keyof AuraRows, SqliteStatement>,
-  plan: { table: keyof AuraRows; columns: string[] },
-  tableRows: Array<Record<string, unknown>>,
-  insertRow?: (plan: { table: keyof AuraRows; columns: string[] }, row: Record<string, unknown>) => void
+function insertTableRows<K extends keyof AuraRows>(
+  statements: InsertStatements,
+  plan: TablePlan<K>,
+  tableRows: ReadonlyArray<AuraRows[K][number]>,
+  insertRow?: (plan: TablePlan<K>, row: AuraRows[K][number]) => void,
 ): void {
   for (const row of tableRows) {
     if (insertRow) {
@@ -626,7 +706,11 @@ function insertTableRows(
   }
 }
 
-function insertRowWithStatements(statements: Map<keyof AuraRows, SqliteStatement>, plan: { table: keyof AuraRows; columns: string[] }, row: Record<string, unknown>): void {
+function insertRowWithStatements<K extends keyof AuraRows>(
+  statements: InsertStatements,
+  plan: TablePlan<K>,
+  row: AuraRows[K][number],
+): void {
   const statement = statements.get(plan.table);
   if (!statement) {
     throw new Error(`No statement for ${plan.table}`);
@@ -634,23 +718,24 @@ function insertRowWithStatements(statements: Map<keyof AuraRows, SqliteStatement
   statement.bind(plan.columns.map((column) => row[column] ?? null)).stepReset();
 }
 
+type SemanticInsertRow =
+  | { table: "stays"; start: number; row: AuraRows["stays"][number] }
+  | { table: "moves"; start: number; row: AuraRows["moves"][number] }
+  | { table: "no_data_gaps"; start: number; row: AuraRows["no_data_gaps"][number] };
+
 function insertSemanticRows(
   rows: AuraRows,
-  insertRow: (plan: { table: keyof AuraRows; columns: string[] }, row: Record<string, unknown>) => void
+  insertRow: <K extends "stays" | "moves" | "no_data_gaps">(plan: TablePlan<K>, row: AuraRows[K][number]) => void,
 ): void {
-  const semanticRows: Array<{
-    table: "stays" | "moves" | "no_data_gaps";
-    start: number;
-    row: Record<string, unknown>;
-  }> = [];
+  const semanticRows: SemanticInsertRow[] = [];
   for (const row of rows.stays) {
-    semanticRows.push({ table: "stays", start: row.start_ts, row: row as Record<string, unknown> });
+    semanticRows.push({ table: "stays", start: row.start_ts, row });
   }
   for (const row of rows.moves) {
-    semanticRows.push({ table: "moves", start: row.start_ts, row: row as Record<string, unknown> });
+    semanticRows.push({ table: "moves", start: row.start_ts, row });
   }
   for (const row of rows.no_data_gaps) {
-    semanticRows.push({ table: "no_data_gaps", start: row.start_ts, row: row as Record<string, unknown> });
+    semanticRows.push({ table: "no_data_gaps", start: row.start_ts, row });
   }
   semanticRows.sort((lhs, rhs) => {
     if (lhs.start !== rhs.start) {
@@ -661,23 +746,67 @@ function insertSemanticRows(
   });
 
   for (const entry of semanticRows) {
-    insertRow(tablePlan(entry.table), entry.row);
+    if (entry.table === "stays") {
+      insertRow(tablePlan("stays"), entry.row);
+    } else if (entry.table === "moves") {
+      insertRow(tablePlan("moves"), entry.row);
+    } else {
+      insertRow(tablePlan("no_data_gaps"), entry.row);
+    }
   }
 }
 
-function tablePlan(table: keyof AuraRows): {
-  table: keyof AuraRows;
-  columns: string[];
-} {
-  const plan = insertPlans.find((item) => item.table === table);
+function tablePlan<K extends keyof AuraRows>(table: K): TablePlan<K> {
+  const plan = insertPlans.find((item) => item.table === table) as TablePlan<K> | undefined;
   if (!plan) {
     throw new Error(`No insert plan for ${table}`);
   }
   return plan;
 }
 
+async function saveBytesToFile(
+  saveHandle: FileSystemFileHandle,
+  bytes: Uint8Array,
+  onProgress: (progress: DatabaseProgress) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const total = Math.max(1, Math.ceil(bytes.byteLength / exportProgressChunkBytes));
+  onProgress({ phase: "export", message: "Saving database file", completed: 0, total });
+
+  let writable: FileSystemWritableFileStream | null = null;
+  let writableClosed = false;
+  try {
+    writable = await saveHandle.createWritable();
+    let completedUnits = 0;
+    for (let offset = 0; offset < bytes.byteLength; offset += exportProgressChunkBytes) {
+      throwIfAborted(signal);
+      await writable.write(
+        new Uint8Array(bytes.subarray(offset, Math.min(bytes.byteLength, offset + exportProgressChunkBytes))),
+      );
+      completedUnits += 1;
+      onProgress({ phase: "export", message: "Saving database file", completed: completedUnits, total });
+    }
+    await writable.close();
+    writableClosed = true;
+    onProgress({ phase: "export", message: "Database file saved", completed: total, total });
+  } catch (error) {
+    if (writable && !writableClosed) {
+      await writable.abort(error).catch(() => undefined);
+    }
+    throw error;
+  }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new DOMException("The operation was cancelled", "AbortError");
+  }
+}
+
 function insertSchemaRecord(db: SqliteDatabase): void {
-  const statement = db.prepare("INSERT INTO migrations (applied_at_ts, from_version, to_version, notes) VALUES (?, ?, ?, ?)");
+  const statement = db.prepare(
+    "INSERT INTO migrations (applied_at_ts, from_version, to_version, notes) VALUES (?, ?, ?, ?)",
+  );
   try {
     statement.bind([Date.now() / 1000, 0, pathSchema.version, `Aura Importer ${pathSchema.name}`]).stepReset();
   } finally {

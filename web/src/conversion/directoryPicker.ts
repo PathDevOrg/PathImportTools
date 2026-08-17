@@ -19,7 +19,10 @@ type IterableDirectoryHandle = FileSystemDirectoryHandle & {
   entries: () => AsyncIterableIterator<[string, IterableFileSystemHandle]>;
 };
 
-export async function pickDirectoryFiles(host: DirectoryPickerHost, filename: string): Promise<PickedDirectorySelection | null> {
+export async function pickDirectoryFiles(
+  host: DirectoryPickerHost,
+  filename: string,
+): Promise<PickedDirectorySelection | null> {
   if (!host.showDirectoryPicker) {
     return null;
   }
@@ -35,7 +38,10 @@ export async function pickDirectoryFiles(host: DirectoryPickerHost, filename: st
   }
 }
 
-async function readDirectoryFiles(directory: FileSystemDirectoryHandle, parentPath: string): Promise<PickedDirectoryFile[]> {
+async function readDirectoryFiles(
+  directory: FileSystemDirectoryHandle,
+  parentPath: string,
+): Promise<PickedDirectoryFile[]> {
   const files: PickedDirectoryFile[] = [];
   const iterableDirectory = directory as IterableDirectoryHandle;
   for await (const [name, handle] of iterableDirectory.entries()) {
@@ -43,7 +49,7 @@ async function readDirectoryFiles(directory: FileSystemDirectoryHandle, parentPa
     if (handle.kind === "file") {
       files.push({ path, file: await handle.getFile() });
     } else {
-      files.push(...await readDirectoryFiles(handle, path));
+      files.push(...(await readDirectoryFiles(handle, path)));
     }
   }
   return files;

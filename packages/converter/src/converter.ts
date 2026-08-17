@@ -1,8 +1,37 @@
 import { getLatestSchemaVersion } from "@aura-importer/aura-schema";
 import { encodeBQDCPath } from "./bqdc.js";
+import {
+  defaultBqdcQuantizationCm,
+  defaultStayRadiusM,
+  diagnosticSampleLimit,
+  duplicateTimestampToleranceS,
+  evidenceKey,
+  fragmentGapThresholdS,
+  fragmentGroupSize,
+  fragmentInvalidDurationRatio,
+  fragmentMedianDurationThresholdS,
+  maximumObservationExtensionS,
+  maximumObservationGapS,
+  maximumPedometerMetersPerStep,
+  maximumReconstructedStayRadiusM,
+  maximumSemanticRouteSpeedMps,
+  minimumGeometryOnlyMoveSpeedMps,
+  minimumPedometerMetersPerStep,
+  minimumReconstructedMoveDistanceM,
+  minimumReconstructedStayRadiusM,
+  movesLastServiceDayEndTs,
+  progressReportInterval,
+  provider as providers,
+  routePointDuplicateTimestampDistanceM,
+  sourceOrder,
+  stayMatchingBufferM,
+  stayUncertaintyGapS,
+  timelineNote,
+  trustedFragmentDurationS,
+} from "./constants.js";
 import { EvidenceLedger, type ObservationEvidence } from "./evidenceLedger.js";
 import { calculateBounds, calculatePathDistance, haversineDistance, validLatLon } from "./geo.js";
-import { streamJsonValues, type StreamedJsonShape } from "./jsonStream.js";
+import { type StreamedJsonShape, streamJsonValues } from "./jsonStream.js";
 import { mapActivityType } from "./modes.js";
 import { arcBackupFileKind, classifySourcePath } from "./sourceSelection.js";
 import { extractTimezoneOffsetSeconds, parseImportTimestamp } from "./time.js";
@@ -30,7 +59,7 @@ import type {
   StayRow,
   StreamableAuraRows,
   StreamableAuraTable,
-  TimelineIntegritySummary
+  TimelineIntegritySummary,
 } from "./types.js";
 
 type JsonObject = Record<string, unknown>;
@@ -40,8 +69,12 @@ type MutableState = {
   next: Record<keyof Omit<AuraRows, "stay_pois">, number>;
   poiCache: Map<string, number>;
   poiRevisions: Map<number, number>;
-  arcPlaces: Map<string, { center: { lat: number; lon: number }; radius: number | null; timezoneOffset: number | null }>;
+  arcPlaces: Map<
+    string,
+    { center: { lat: number; lon: number }; radius: number | null; timezoneOffset: number | null }
+  >;
   itemMap: Map<string, { kind: "stay" | "move"; ids: number[] }>;
+  moveIndex: Map<string, MoveRow[]>;
   movesPedometerKeys: Set<string>;
   pedometerClaims: PedometerClaim[];
   movesSummaryStepTotals: Map<string, number>;
@@ -134,12 +167,13 @@ type ClassifiedFile = {
 type ConversionOptions = {
   onProgress?: (progress: ImportProgress) => void;
   onRows?: <T extends StreamableAuraTable>(table: T, rows: StreamableAuraRows[T]) => void;
+  signal?: AbortSignal;
 };
 
 type ReadTracker = {
   readValues: (
     file: ClassifiedFile,
-    onValue: (value: unknown, shape: StreamedJsonShape) => void
+    onValue: (value: unknown, shape: StreamedJsonShape) => boolean | undefined,
   ) => Promise<StreamedJsonShape>;
 };
 
@@ -158,7 +192,7 @@ const arcRevisionSemanticFields = new Set([
   "confirmedType",
   "manualActivityType",
   "uncertainActivityType",
-  "unknownActivityType"
+  "unknownActivityType",
 ]);
 
 type MovesDayCandidate = {
@@ -190,82 +224,103 @@ type HistoryEvidence = {
 
 class HistoryInputError extends Error {}
 
-const diagnosticSampleLimit = 20;
-// Moves and its API ended on July 31, 2018. The extra UTC margin covers the complete final local day.
-const movesLastServiceDayEndTs = Date.UTC(2018, 7, 2) / 1_000;
-const maximumSemanticRouteSpeedMps = 400;
-const minimumGeometryOnlyMoveSpeedMps = 0.5;
-const minimumPedometerMetersPerStep = 0.3;
-const maximumPedometerMetersPerStep = 2.5;
-
-const sourceOrder: SourceType[] = ["arc-export", "arc-backup", "moves-export"];
-
-export async function scanImportEntries(entries: ImportFileHandle[]): Promise<ImportScan> {
+export async function scanImportEntries(
+  entries: ImportFileHandle[],
+  options: { signal?: AbortSignal; onProgress?: (progress: ImportProgress) => void } = {},
+): Promise<ImportScan> {
   const detected = new Set<SourceType>();
   let supportedFileCount = 0;
-  for (const entry of entries) {
-    if (!isJsonPath(entry.path)) {
-      continue;
-    }
-    try {
-      const probe = await classifyJsonEntry(entry);
-      if (probe.kind) {
-        detected.add(probe.kind);
+  for (const [index, entry] of entries.entries()) {
+    throwIfAborted(options.signal);
+    options.onProgress?.({
+      phase: "scan",
+      message: `Scanning ${entry.path}`,
+      completed: index,
+      total: entries.length,
+    });
+    if (isJsonPath(entry.path)) {
+      try {
+        const probe = await classifyJsonEntry(entry, options.signal);
+        if (probe.kind) {
+          detected.add(probe.kind);
+        }
+        if (probe.usable) {
+          supportedFileCount += 1;
+        }
+      } catch (error) {
+        if (isAbortError(error)) {
+          throw error;
+        }
       }
-      if (probe.usable) {
-        supportedFileCount += 1;
-      }
-    } catch {
-      // ignore unreadable or unparseable files during scan
     }
+    options.onProgress?.({
+      phase: "scan",
+      message: `Scanned ${entry.path}`,
+      completed: index + 1,
+      total: entries.length,
+    });
   }
   return {
     sourceTypes: sourceOrder.filter((source) => detected.has(source)),
     fileCount: entries.length,
     supportedFileCount,
-    unknownFileCount: entries.length - supportedFileCount
+    unknownFileCount: entries.length - supportedFileCount,
   };
 }
 
-async function classifyJsonEntry(entry: ImportFileHandle): Promise<ClassifyProbe> {
+async function classifyJsonEntry(entry: ImportFileHandle, signal?: AbortSignal): Promise<ClassifyProbe> {
   const pathKind = classifySourcePath(entry.path);
   if (pathKind && arcBackupFileKind(entry.path) !== "range-summary") {
     return { kind: pathKind, usable: true };
   }
   let kind: SourceType | null = null;
   let usable = false;
-  const stop = new Error("classification complete");
   try {
-    await streamJsonValues(entry.path, importFileChunks(entry), (value, shape) => {
-      const candidateKind = shape === "timeline-items" ? "arc-export" : classifySource(value);
-      if (!candidateKind) {
-        return;
-      }
-      kind ??= candidateKind;
-      if (shape === "timeline-items" || !isArcRangeSummary(asObject(value) ?? {})) {
+    await streamJsonValues(
+      entry.path,
+      importFileChunks(entry),
+      (value, shape) => {
+        const candidateKind = shape === "timeline-items" ? "arc-export" : classifySource(value);
+        if (!candidateKind) {
+          return false;
+        }
         kind = candidateKind;
-        usable = true;
-        throw stop;
-      }
-    });
+        if (shape === "timeline-items" || !isArcRangeSummary(asObject(value) ?? {})) {
+          usable = true;
+          return true;
+        }
+        return false;
+      },
+      { signal },
+    );
   } catch (error) {
-    if (error === stop) {
-      return { kind, usable };
+    if (isAbortError(error)) {
+      throw error;
     }
     return { kind: null, usable: false };
   }
   return { kind, usable };
 }
 
-export async function convertImportEntries(entries: ImportFileEntry[], options: ConversionOptions = {}): Promise<ConversionResult> {
-  return convertImportFileHandles(entries.map((entry) => ({
-    path: entry.path,
-    size: entry.size ?? entry.data.byteLength,
-    readData: async () => entry.data
-  })), options);
+export async function convertImportEntries(
+  entries: ImportFileEntry[],
+  options: ConversionOptions = {},
+): Promise<ConversionResult> {
+  return convertImportFileHandles(
+    entries.map((entry) => ({
+      path: entry.path,
+      size: entry.size ?? entry.data.byteLength,
+      readData: async () => entry.data,
+    })),
+    options,
+  );
 }
 
-export async function convertImportFileHandles(entries: ImportFileHandle[], options: ConversionOptions = {}): Promise<ConversionResult> {
+export async function convertImportFileHandles(
+  entries: ImportFileHandle[],
+  options: ConversionOptions = {},
+): Promise<ConversionResult> {
+  throwIfAborted(options.signal);
   const state = makeState(options.onRows);
   const files: ClassifiedFile[] = [...entries]
     .filter((entry) => isJsonPath(entry.path))
@@ -274,32 +329,35 @@ export async function convertImportFileHandles(entries: ImportFileHandle[], opti
       path: entry.path,
       size: entry.size,
       readData: entry.readData,
-      readChunks: entry.readChunks
+      readChunks: entry.readChunks,
     }));
-  const tracker = makeReadTracker(files, options.onProgress);
+  const tracker = makeReadTracker(files, options.onProgress, options.signal);
   const ledger = await EvidenceLedger.create();
   let evidence: HistoryEvidence;
   try {
-    evidence = await collectHistoryEvidence(files, state, tracker, ledger);
+    evidence = await collectHistoryEvidence(files, state, tracker, ledger, options.signal);
+    throwIfAborted(options.signal);
     if (evidence.validFileCount === 0) {
       if (evidence.arcCoverage.length > 0) {
         throw new Error("Arc TimelineRangeSummary metadata was found, but it contains no timeline records to convert");
       }
       throw evidence.firstError ?? new Error("No supported Arc or Moves history was found");
     }
-    fuseMovesEvidence(ledger);
+    fuseMovesEvidence(ledger, options.signal);
     ledger.seal();
-    materializeArcEvidence(evidence, ledger, state);
+    materializeArcEvidence(evidence, ledger, state, options.signal);
     ledger.forEachFusedMovesDay((day) => {
+      throwIfAborted(options.signal);
       materializeMovesEvidence([day], state);
     });
-    materializePedometerClaims(state);
-    materializeArcObservations(ledger, state);
+    materializePedometerClaims(state, options.signal);
+    materializeArcObservations(ledger, state, options.signal);
   } finally {
     await ledger.close();
   }
 
-  normalizeTimeline(state, options.onProgress);
+  throwIfAborted(options.signal);
+  normalizeTimeline(state, options.onProgress, options.signal);
   assertNonEmptyConversion(state);
   const timelineIntegrity = verifyTimelineIntegrity(state.rows);
   const report = makeReport(
@@ -307,12 +365,17 @@ export async function convertImportFileHandles(entries: ImportFileHandle[], opti
     entries.length,
     sourceOrder.filter((source) => evidence.detected.has(source)),
     timelineIntegrity,
-    options.onProgress
+    options.onProgress,
+    options.signal,
   );
   return { rows: state.rows, report };
 }
 
-function makeReadTracker(files: ClassifiedFile[], onProgress: ConversionOptions["onProgress"]): ReadTracker {
+function makeReadTracker(
+  files: ClassifiedFile[],
+  onProgress: ConversionOptions["onProgress"],
+  signal?: AbortSignal,
+): ReadTracker {
   const total = files.length;
   const bytesTotal = files.reduce((sum, file) => sum + file.size, 0);
   let completed = 0;
@@ -320,15 +383,17 @@ function makeReadTracker(files: ClassifiedFile[], onProgress: ConversionOptions[
 
   return {
     readValues: async (file, onValue) => {
+      throwIfAborted(signal);
       onProgress?.({
         phase: "read",
         message: `Reading ${file.path}`,
         completed,
         total,
         bytesCompleted,
-        bytesTotal
+        bytesTotal,
       });
-      const shape = await streamJsonValues(file.path, importFileChunks(file), onValue);
+      const shape = await streamJsonValues(file.path, importFileChunks(file), onValue, { signal });
+      throwIfAborted(signal);
       completed += 1;
       bytesCompleted += file.size;
       onProgress?.({
@@ -337,10 +402,10 @@ function makeReadTracker(files: ClassifiedFile[], onProgress: ConversionOptions[
         completed,
         total,
         bytesCompleted,
-        bytesTotal
+        bytesTotal,
       });
       return shape;
-    }
+    },
   };
 }
 
@@ -357,7 +422,7 @@ function makeState(onRows?: ConversionOptions["onRows"]): MutableState {
       raw_motion_activity: [],
       raw_pedometer: [],
       raw_visits: [],
-      no_data_gaps: []
+      no_data_gaps: [],
     },
     next: {
       pois: 1,
@@ -369,12 +434,13 @@ function makeState(onRows?: ConversionOptions["onRows"]): MutableState {
       raw_motion_activity: 1,
       raw_pedometer: 1,
       raw_visits: 1,
-      no_data_gaps: 1
+      no_data_gaps: 1,
     },
     poiCache: new Map(),
     poiRevisions: new Map(),
     arcPlaces: new Map(),
     itemMap: new Map(),
+    moveIndex: new Map(),
     movesPedometerKeys: new Set(),
     pedometerClaims: [],
     movesSummaryStepTotals: new Map(),
@@ -390,9 +456,9 @@ function makeState(onRows?: ConversionOptions["onRows"]): MutableState {
       raw_gps: 0,
       samples: 0,
       raw_motion_activity: 0,
-      raw_pedometer: 0
+      raw_pedometer: 0,
     },
-    onRows
+    onRows,
   };
 }
 
@@ -452,20 +518,23 @@ function isUsableMovesSegment(segment: JsonObject): boolean {
   const type = stringValue(segment.type);
   if (type === "place") {
     const place = asObject(segment.place);
-    return locationFrom(place?.location) !== null
-      || placeIdentifier(place) !== null
-      || meaningfulName(place?.name) !== null
-      || stringValue(place?.type) === "home"
-      || stringValue(place?.type) === "work"
-      || arrayValue(segment.activities).length > 0;
+    return (
+      locationFrom(place?.location) !== null ||
+      placeIdentifier(place) !== null ||
+      meaningfulName(place?.name) !== null ||
+      stringValue(place?.type) === "home" ||
+      stringValue(place?.type) === "work" ||
+      arrayValue(segment.activities).length > 0
+    );
   }
   return type === "move" || type === "off";
 }
 
 function isUsableMovesSummary(summary: JsonObject): boolean {
-  return stringValue(summary.activity) !== null
-    && [summary.steps, summary.distance, summary.duration]
-      .some((value) => nonNegative(numberValue(value)) !== null);
+  return (
+    stringValue(summary.activity) !== null &&
+    [summary.steps, summary.distance, summary.duration].some((value) => nonNegative(numberValue(value)) !== null)
+  );
 }
 
 function placeIdentifier(value: unknown): string | null {
@@ -488,13 +557,13 @@ function movesPlaceIdentity(place: JsonObject): { id: string | null; rank: numbe
   return {
     id,
     rank: facebookId ? 3 : foursquareId ? 2 : temporaryId ? 1 : 0,
-    aliases: [...new Set([id, temporaryId].filter((value): value is string => value !== null))]
+    aliases: [...new Set([id, temporaryId].filter((value): value is string => value !== null))],
   };
 }
 
 function canonicalMovesPlaceIdentity(
   state: MutableState,
-  identity: { id: string | null; rank: number; aliases: string[] }
+  identity: { id: string | null; rank: number; aliases: string[] },
 ): { id: string | null; rank: number; aliases: string[] } {
   let id = identity.id;
   let rank = identity.rank;
@@ -520,9 +589,7 @@ function canonicalMovesPlaceIdentity(
 
 function isArcRangeSummary(value: JsonObject): boolean {
   const range = asObject(value.dateRange);
-  return range !== null
-    && stringValue(range.start) !== null
-    && nonNegative(numberValue(range.duration)) !== null;
+  return range !== null && stringValue(range.start) !== null && nonNegative(numberValue(range.duration)) !== null;
 }
 
 function isJsonPath(path: string): boolean {
@@ -571,11 +638,13 @@ async function collectHistoryEvidence(
   files: ClassifiedFile[],
   state: MutableState,
   tracker: ReadTracker,
-  ledger: EvidenceLedger
+  ledger: EvidenceLedger,
+  signal?: AbortSignal,
 ): Promise<HistoryEvidence> {
   const evidence = makeHistoryEvidence();
 
   for (const file of files) {
+    throwIfAborted(signal);
     const fileEvidence = makeHistoryEvidence();
     let validRecordCount = 0;
     let fileError: Error | null = null;
@@ -584,11 +653,11 @@ async function collectHistoryEvidence(
     ledger.beginFile();
     try {
       const shape = await tracker.readValues(file, (value, shape) => {
-        const kind = shape === "timeline-items"
-          ? "arc-export"
-          : classifySource(value) ?? classifySourcePath(file.path);
+        throwIfAborted(signal);
+        const kind =
+          shape === "timeline-items" ? "arc-export" : (classifySource(value) ?? classifySourcePath(file.path));
         if (!kind) {
-          return;
+          return false;
         }
         try {
           const usable = ingestHistoryValue(kind, shape, value, file.path, fileEvidence, ledger);
@@ -605,6 +674,7 @@ async function collectHistoryEvidence(
           fileError ??= wrapped;
           recordDiagnostic(state, wrapped.message);
         }
+        return false;
       });
       if (validRecordCount === 0 && (shape === "timeline-items" || classifySourcePath(file.path))) {
         fileError ??= historyFileError(file.path, new Error("History file contains no usable records"));
@@ -613,6 +683,9 @@ async function collectHistoryEvidence(
       parsedSuccessfully = true;
     } catch (error) {
       ledger.rollbackFile();
+      if (isAbortError(error)) {
+        throw error;
+      }
       if (infrastructureError !== null) {
         throw infrastructureError;
       }
@@ -641,7 +714,7 @@ function makeHistoryEvidence(): HistoryEvidence {
     arcCoverage: [],
     detected: new Set(),
     validFileCount: 0,
-    firstError: null
+    firstError: null,
   };
 }
 
@@ -678,7 +751,7 @@ function ingestHistoryValue(
   value: unknown,
   path: string,
   evidence: HistoryEvidence,
-  ledger: EvidenceLedger
+  ledger: EvidenceLedger,
 ): boolean {
   if (kind === "arc-export") {
     if (shape === "timeline-items") {
@@ -782,7 +855,7 @@ function addArcItemCandidate(
   path: string,
   source: ArcItemCandidate["source"],
   evidence: HistoryEvidence,
-  ledger: EvidenceLedger
+  ledger: EvidenceLedger,
 ): void {
   const key = arcItemKey(item);
   if (!key) {
@@ -802,7 +875,7 @@ function addArcItemCandidate(
     path,
     source,
     item: semanticItem,
-    sampleCount: samples.length
+    sampleCount: samples.length,
   });
   evidence.arcItems.set(key, candidates);
 }
@@ -828,14 +901,14 @@ function observationEvidence(sample: JsonObject, parentItemId: string | null): O
     location.speed,
     location.speedAccuracy,
     location.course,
-    location.courseAccuracy
+    location.courseAccuracy,
   ].filter((value) => numberValue(value) !== null).length;
   const confirmed = stringValue(sample.confirmedType);
   const coreMotion = stringValue(sample.coreMotionActivityType);
   const movingState = stringValue(sample.movingState);
   const activity = confirmed ?? coreMotion ?? movingState;
   const activityRank = confirmed ? 3 : coreMotion ? 2 : movingState ? 1 : 0;
-  if (ts === null || ts < 0 || !point && !activity) {
+  if (ts === null || ts < 0 || (!point && !activity)) {
     return null;
   }
   const identity = sampleId
@@ -850,8 +923,10 @@ function observationEvidence(sample: JsonObject, parentItemId: string | null): O
     horizontalAccuracy,
     numberValue(location.verticalAccuracy),
     numberValue(location.speed),
-    numberValue(location.course)
-  ].map((value) => value ?? "").join("|");
+    numberValue(location.course),
+  ]
+    .map((value) => value ?? "")
+    .join("|");
 
   return {
     identity,
@@ -874,7 +949,7 @@ function observationEvidence(sample: JsonObject, parentItemId: string | null): O
     activityRank,
     movingState,
     movingStateRank: movingState ? 1 : 0,
-    revision: revisionValue(sample)
+    revision: revisionValue(sample),
   };
 }
 
@@ -894,11 +969,7 @@ function arcExportItems(value: unknown): JsonObject[] {
 }
 
 function validateArcTimelineItem(item: JsonObject): void {
-  if (
-    typeof item.isVisit !== "boolean"
-    || stringValue(item.startDate) === null
-    || stringValue(item.endDate) === null
-  ) {
+  if (typeof item.isVisit !== "boolean" || stringValue(item.startDate) === null || stringValue(item.endDate) === null) {
     throw new HistoryInputError("Arc timeline item is missing isVisit, startDate, or endDate");
   }
 }
@@ -918,7 +989,10 @@ function arcItemKey(item: JsonObject): string | null {
 
 function arcItemScore(item: JsonObject, sampleCount = arrayValue(item.samples).length): ArcItemScore {
   const samples = arrayValue(item.samples);
-  const sampleFields = samples.reduce((count, sample) => count + Object.values(sample).filter((value) => value !== null && value !== undefined).length, 0);
+  const sampleFields = samples.reduce(
+    (count, sample) => count + Object.values(sample).filter((value) => value !== null && value !== undefined).length,
+    0,
+  );
   const place = asObject(item.place);
   const start = parseImportTimestamp(stringValue(item.startDate));
   const end = parseImportTimestamp(stringValue(item.endDate));
@@ -930,7 +1004,7 @@ function arcItemScore(item: JsonObject, sampleCount = arrayValue(item.samples).l
     place && (locationFrom(place.center) || locationFrom(place.location)) ? 1 : 0,
     sampleCount,
     sampleFields,
-    Object.values(item).filter((value) => value !== null && value !== undefined).length
+    Object.values(item).filter((value) => value !== null && value !== undefined).length,
   ];
 }
 
@@ -948,9 +1022,18 @@ type ArcFragmentWindow = {
   items: FusedArcItem[];
 };
 
-function materializeArcEvidence(evidence: HistoryEvidence, ledger: EvidenceLedger, state: MutableState): void {
+function materializeArcEvidence(
+  evidence: HistoryEvidence,
+  ledger: EvidenceLedger,
+  state: MutableState,
+  signal?: AbortSignal,
+): void {
   for (const placeId of [...evidence.arcPlaces.keys()].sort()) {
-    const candidates = candidatesAfterTombstone(evidence.arcPlaces.get(placeId)!, evidence.arcPlaceTombstones.get(placeId));
+    throwIfAborted(signal);
+    const candidates = candidatesAfterTombstone(
+      evidence.arcPlaces.get(placeId)!,
+      evidence.arcPlaceTombstones.get(placeId),
+    );
     if (candidates.length > 0) {
       const place = fuseObjectCandidates(candidates);
       if (!locationFrom(place.center) && !locationFrom(place.location)) {
@@ -963,57 +1046,78 @@ function materializeArcEvidence(evidence: HistoryEvidence, ledger: EvidenceLedge
 
   const items = [...evidence.arcItems.entries()]
     .flatMap(([key, candidates]) => {
-      const live = candidatesAfterTombstone(candidates, evidence.arcItemTombstones.get(key), (candidate) => candidate.item);
+      const live = candidatesAfterTombstone(
+        candidates,
+        evidence.arcItemTombstones.get(key),
+        (candidate) => candidate.item,
+      );
       return live.length > 0 ? [fuseArcItemCandidates(live, key)] : [];
     })
-    .sort((lhs, rhs) => arcItemStart(lhs.item) - arcItemStart(rhs.item) || compareStableStrings(canonicalJson(lhs.item), canonicalJson(rhs.item)));
+    .sort(
+      (lhs, rhs) =>
+        arcItemStart(lhs.item) - arcItemStart(rhs.item) ||
+        compareStableStrings(canonicalJson(lhs.item), canonicalJson(rhs.item)),
+    );
   const fragmentWindows = findArcFragmentWindows(items);
   const fragmentedItems = new Set(fragmentWindows.flatMap((window) => window.items));
 
-  collectArcPedometerClaims(items, ledger, state);
+  collectArcPedometerClaims(items, ledger, state, signal);
 
   for (const fused of items) {
+    throwIfAborted(signal);
     if (!fragmentedItems.has(fused)) {
       importFusedArcItem(fused, ledger, state);
     }
   }
 
   for (const window of fragmentWindows) {
+    throwIfAborted(signal);
     reconstructArcFragmentWindow(window, ledger, state);
   }
 
-  const knownTimelineItemIds = new Set(items.flatMap((item) => {
-    const itemId = stringValue(item.item.itemId);
-    return itemId ? [item.observationLink, itemId] : [item.observationLink];
-  }));
+  const knownTimelineItemIds = new Set(
+    items.flatMap((item) => {
+      const itemId = stringValue(item.item.itemId);
+      return itemId ? [item.observationLink, itemId] : [item.observationLink];
+    }),
+  );
   for (const key of evidence.arcItemTombstones.keys()) {
     if (key.startsWith("id:")) {
       knownTimelineItemIds.add(key.slice(3));
     }
   }
-  reconstructUnlinkedArcObservations(ledger, state, knownTimelineItemIds);
+  reconstructUnlinkedArcObservations(ledger, state, knownTimelineItemIds, signal);
 }
 
-function collectArcPedometerClaims(items: FusedArcItem[], ledger: EvidenceLedger, state: MutableState): void {
+function collectArcPedometerClaims(
+  items: FusedArcItem[],
+  ledger: EvidenceLedger,
+  state: MutableState,
+  signal?: AbortSignal,
+): void {
   for (const [sequence, fused] of items.entries()) {
+    throwIfAborted(signal);
     const itemId = stringValue(fused.item.itemId);
     const samples = ledger.observationsForTimelineItem(itemId ?? fused.observationLink) as JsonObject[];
     const item = samples.length > 0 ? { ...fused.item, samples } : fused.item;
     const placeId = stringValue(item.placeId);
-    const timezoneOffset = timezoneOffsetValue(samples[0]?.secondsFromGMT)
-      ?? timezoneOffsetValue(item.secondsFromGMT)
-      ?? (placeId ? state.arcPlaces.get(placeId)?.timezoneOffset ?? null : null);
+    const timezoneOffset =
+      timezoneOffsetValue(samples[0]?.secondsFromGMT) ??
+      timezoneOffsetValue(item.secondsFromGMT) ??
+      (placeId ? (state.arcPlaces.get(placeId)?.timezoneOffset ?? null) : null);
     importPedometerData(item, state, timezoneOffset, sequence);
   }
 }
 
-function materializeArcObservations(ledger: EvidenceLedger, state: MutableState): void {
+function materializeArcObservations(ledger: EvidenceLedger, state: MutableState, signal?: AbortSignal): void {
   ledger.forEachTimelineItem((timelineItemId, samples) => {
+    throwIfAborted(signal);
     if (timelineItemId) {
       importArcBackupRoutes(samples as JsonObject[], state);
     }
   });
   ledger.forEachCanonicalObservation((samples) => {
+    throwIfAborted(signal);
     importSamples(samples as JsonObject[], state);
   });
 }
@@ -1026,7 +1130,7 @@ function fuseArcItemCandidates(candidates: ArcItemCandidate[], observationLink: 
     }
     const score = compareNumericTuples(
       arcItemScore(lhs.item, lhs.sampleCount),
-      arcItemScore(rhs.item, rhs.sampleCount)
+      arcItemScore(rhs.item, rhs.sampleCount),
     );
     return score || compareStableStrings(canonicalJson(lhs.item), canonicalJson(rhs.item));
   });
@@ -1039,7 +1143,7 @@ function fuseArcItemCandidates(candidates: ArcItemCandidate[], observationLink: 
     item,
     sampleCount: Math.max(...candidates.map((candidate) => candidate.sampleCount)),
     hasExport: candidates.some((candidate) => candidate.source === "export"),
-    observationLink
+    observationLink,
   };
 }
 
@@ -1060,7 +1164,7 @@ function recordTombstone(target: Map<string, number>, key: string, object: JsonO
 function candidatesAfterTombstone<T>(
   candidates: T[],
   tombstone: number | undefined,
-  value: (candidate: T) => JsonObject = (candidate) => candidate as JsonObject
+  value: (candidate: T) => JsonObject = (candidate) => candidate as JsonObject,
 ): T[] {
   return tombstone === undefined
     ? candidates
@@ -1124,7 +1228,10 @@ function canonicalJson(value: unknown): string {
   }
   const object = asObject(value);
   if (object) {
-    return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(",")}}`;
+    return `{${Object.keys(object)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`)
+      .join(",")}}`;
   }
   return JSON.stringify(value) ?? "null";
 }
@@ -1174,13 +1281,12 @@ function importFusedArcItem(fused: FusedArcItem, ledger: EvidenceLedger, state: 
   const samples = ledger.observationsForTimelineItem(itemId ?? fused.observationLink);
   const firstSample = samples[0] ?? null;
   const item: JsonObject = samples.length > 0 ? { ...fused.item, samples } : { ...fused.item };
-  item.secondsFromGMT = timezoneOffsetValue(item.secondsFromGMT)
-    ?? timezoneOffsetValue(firstSample?.secondsFromGMT);
+  item.secondsFromGMT = timezoneOffsetValue(item.secondsFromGMT) ?? timezoneOffsetValue(firstSample?.secondsFromGMT);
   if (isLowConfidenceArcItem(item) && !arcItemSupportedBySamples(item, samples as JsonObject[])) {
     const start = arcItemStart(item);
     const end = arcItemEnd(item);
     if (Number.isFinite(start) && Number.isFinite(end)) {
-      insertImportGap(state, start, end, "arc_low_confidence");
+      insertImportGap(state, start, end, timelineNote.arcLowConfidence);
       recordDiagnostic(state, "Replaced unsupported low-confidence Arc activity with a gap");
     }
     return;
@@ -1192,10 +1298,10 @@ function importFusedArcItem(fused: FusedArcItem, ledger: EvidenceLedger, state: 
     if (itemId) {
       importArcBackupTimelineItem(item, state);
     } else {
-      importArcTimelineItem(item, state, "arc_backup", false);
+      importArcTimelineItem(item, state, providers.arcBackup, false);
     }
   } else {
-    importArcTimelineItem(item, state, fused.hasExport ? "arc_import" : "arc_backup", false);
+    importArcTimelineItem(item, state, fused.hasExport ? providers.arcImport : providers.arcBackup, false);
   }
 }
 
@@ -1220,7 +1326,8 @@ function findArcFragmentWindows(items: FusedArcItem[]): ArcFragmentWindow[] {
       .filter((duration) => duration > 0)
       .sort((lhs, rhs) => lhs - rhs);
     const fragmentedByInvalidDurations = nonPositiveCount > 0 && nonPositiveCount / group.length >= 0.4;
-    const fragmentedByShortDensity = group.length >= 20 && (median(positiveDurations) ?? 0) < 30;
+    const fragmentedByShortDensity =
+      group.length >= fragmentGroupSize && (median(positiveDurations) ?? 0) < fragmentMedianDurationThresholdS;
     if (!fragmentedByInvalidDurations && !fragmentedByShortDensity) {
       continue;
     }
@@ -1243,9 +1350,11 @@ function findArcFragmentWindows(items: FusedArcItem[]): ArcFragmentWindow[] {
           start: Math.min(...starts),
           end: Math.max(
             Math.max(...ends),
-            nonPositiveStarts.length > 0 ? Math.max(...nonPositiveStarts) + 60 : Number.NEGATIVE_INFINITY
+            nonPositiveStarts.length > 0
+              ? Math.max(...nonPositiveStarts) + trustedFragmentDurationS
+              : Number.NEGATIVE_INFINITY,
           ),
-          items: pending
+          items: pending,
         });
       }
       pending = [];
@@ -1261,15 +1370,20 @@ function findArcFragmentWindows(items: FusedArcItem[]): ArcFragmentWindow[] {
       const overlapsAnchor = anchors.some((anchor) => {
         const anchorStart = arcItemStart(anchor.item);
         const anchorEnd = arcItemEnd(anchor.item);
-        return Number.isFinite(start) && Number.isFinite(end) && start < anchorEnd && end > anchorStart
-          || Number.isFinite(start) && start >= anchorStart && start < anchorEnd;
+        return (
+          (Number.isFinite(start) && Number.isFinite(end) && start < anchorEnd && end > anchorStart) ||
+          (Number.isFinite(start) && start >= anchorStart && start < anchorEnd)
+        );
       });
       if (overlapsAnchor) {
         flush();
         continue;
       }
       const previous = pending.at(-1);
-      if (previous && start - Math.max(arcItemStart(previous.item), arcItemEnd(previous.item)) > 600) {
+      if (
+        previous &&
+        start - Math.max(arcItemStart(previous.item), arcItemEnd(previous.item)) > fragmentGapThresholdS
+      ) {
         flush();
       }
       pending.push(entry);
@@ -1302,11 +1416,13 @@ function isTrustedArcAnchor(item: FusedArcItem): boolean {
   if (!(duration > 0) || isLowConfidenceArcItem(item.item)) {
     return false;
   }
-  return item.item.manualActivityType === true
-    || item.item.manualPlace === true
-    || stringValue(item.item.confirmedType) !== null
-    || duration >= 60
-    || item.sampleCount >= 2;
+  return (
+    item.item.manualActivityType === true ||
+    item.item.manualPlace === true ||
+    stringValue(item.item.confirmedType) !== null ||
+    duration >= trustedFragmentDurationS ||
+    item.sampleCount >= 2
+  );
 }
 
 function isLowConfidenceArcItem(item: JsonObject): boolean {
@@ -1314,9 +1430,9 @@ function isLowConfidenceArcItem(item: JsonObject): boolean {
     return false;
   }
   const confidence = numberValue(item.activityTypeConfidenceScore);
-  return item.uncertainActivityType === true
-    || item.unknownActivityType === true
-    || confidence !== null && confidence <= 0;
+  return (
+    item.uncertainActivityType === true || item.unknownActivityType === true || (confidence !== null && confidence <= 0)
+  );
 }
 
 function arcItemSupportedBySamples(item: JsonObject, samples: JsonObject[]): boolean {
@@ -1325,10 +1441,11 @@ function arcItemSupportedBySamples(item: JsonObject, samples: JsonObject[]): boo
   }
   const activities = samples.map(sampleActivity);
   const stationaryCount = activities.filter((activity) => activity === "stationary").length;
-  const movingCount = activities.filter((activity) => activity && activity !== "stationary" && activity !== "unknown" && activity !== "uncertain").length;
-  const semanticSupport = item.isVisit === true
-    ? stationaryCount / samples.length >= 0.5
-    : movingCount / samples.length >= 0.5;
+  const movingCount = activities.filter(
+    (activity) => activity && activity !== "stationary" && activity !== "unknown" && activity !== "uncertain",
+  ).length;
+  const semanticSupport =
+    item.isVisit === true ? stationaryCount / samples.length >= 0.5 : movingCount / samples.length >= 0.5;
   if (semanticSupport) {
     return true;
   }
@@ -1340,8 +1457,11 @@ function arcItemSupportedBySamples(item: JsonObject, samples: JsonObject[]): boo
     }
     const centerLat = median(coords.map((coordinate) => coordinate[1]));
     const centerLon = median(coords.map((coordinate) => coordinate[0]));
-    return centerLat !== null && centerLon !== null
-      && coords.every(([lon, lat]) => haversineDistance(centerLat, centerLon, lat, lon) <= 200);
+    return (
+      centerLat !== null &&
+      centerLon !== null &&
+      coords.every(([lon, lat]) => haversineDistance(centerLat, centerLon, lat, lon) <= maximumReconstructedStayRadiusM)
+    );
   }
   if (stationaryCount > movingCount) {
     return false;
@@ -1356,17 +1476,22 @@ function reconstructArcFragmentWindow(window: ArcFragmentWindow, ledger: Evidenc
 function reconstructUnlinkedArcObservations(
   ledger: EvidenceLedger,
   state: MutableState,
-  knownTimelineItemIds: ReadonlySet<string>
+  knownTimelineItemIds: ReadonlySet<string>,
+  signal?: AbortSignal,
 ): void {
+  throwIfAborted(signal);
   const covered = [
     ...state.rows.stays.map((row) => ({ start: row.start_ts, end: row.end_ts })),
     ...state.rows.moves.map((row) => ({ start: row.start_ts, end: row.end_ts })),
-    ...state.rows.no_data_gaps.map((row) => ({ start: row.start_ts, end: row.end_ts }))
+    ...state.rows.no_data_gaps.map((row) => ({ start: row.start_ts, end: row.end_ts })),
   ]
-    .filter((interval): interval is { start: number; end: number } => interval.end !== null && interval.end > interval.start)
+    .filter(
+      (interval): interval is { start: number; end: number } => interval.end !== null && interval.end > interval.start,
+    )
     .sort((lhs, rhs) => lhs.start - rhs.start);
 
   for (const window of ledger.unlinkedObservationWindows(knownTimelineItemIds)) {
+    throwIfAborted(signal);
     let cursor = window.start;
     for (const interval of covered) {
       if (interval.end <= cursor) {
@@ -1394,78 +1519,114 @@ function reconstructArcInterval(
   end: number,
   ledger: EvidenceLedger,
   state: MutableState,
-  orphanTimelineItemIds: ReadonlySet<string> | null = null
+  orphanTimelineItemIds: ReadonlySet<string> | null = null,
 ): void {
   if (!(end > start)) {
     return;
   }
-  const samples = (orphanTimelineItemIds
-    ? ledger.unlinkedObservationsBetween(start, end, orphanTimelineItemIds)
-    : ledger.observationsBetween(start, end)) as JsonObject[];
+  const samples = (
+    orphanTimelineItemIds
+      ? ledger.unlinkedObservationsBetween(start, end, orphanTimelineItemIds)
+      : ledger.observationsBetween(start, end)
+  ) as JsonObject[];
   const times = samples
     .map(sampleTimestamp)
     .filter((value): value is number => value !== null)
     .sort((lhs, rhs) => lhs - rhs);
   if (times.length < 2) {
-    insertImportGap(state, start, end, "arc_fragment_low_evidence");
+    insertImportGap(state, start, end, timelineNote.arcFragmentLowEvidence);
     return;
   }
-  const deltas = times.slice(1).map((time, index) => time - times[index]!).filter((delta) => delta > 0 && delta <= 600);
-  const extension = Math.max(1, Math.min(300, median(deltas) ?? 60));
+  const deltas = times
+    .slice(1)
+    .map((time, index) => time - times[index]!)
+    .filter((delta) => delta > 0 && delta <= maximumObservationGapS);
+  const extension = Math.max(1, Math.min(maximumObservationExtensionS, median(deltas) ?? trustedFragmentDurationS));
   const reconstructedStart = Math.max(start, times[0]!);
   const reconstructedEnd = Math.min(end, times.at(-1)! + extension);
   if (!(reconstructedEnd > reconstructedStart)) {
-    insertImportGap(state, start, end, "arc_fragment_low_evidence");
+    insertImportGap(state, start, end, timelineNote.arcFragmentLowEvidence);
     return;
   }
 
-  insertImportGap(state, start, reconstructedStart, "arc_fragment_unobserved");
-  insertImportGap(state, reconstructedEnd, end, "arc_fragment_unobserved");
+  insertImportGap(state, start, reconstructedStart, timelineNote.arcFragmentUnobserved);
+  insertImportGap(state, reconstructedEnd, end, timelineNote.arcFragmentUnobserved);
 
   const preparedRoute = prepareRouteFromSamples(samples);
   const routePoints = preparedRoute.points;
   const coords = routePoints.map((point) => point.coord);
   const centerLat = median(coords.map((coordinate) => coordinate[1]));
   const centerLon = median(coords.map((coordinate) => coordinate[0]));
-  const distances = centerLat === null || centerLon === null
-    ? []
-    : coords.map(([lon, lat]) => haversineDistance(centerLat, centerLon, lat, lon)).sort((lhs, rhs) => lhs - rhs);
+  const distances =
+    centerLat === null || centerLon === null
+      ? []
+      : coords.map(([lon, lat]) => haversineDistance(centerLat, centerLon, lat, lon)).sort((lhs, rhs) => lhs - rhs);
   const radius = percentile(distances, 0.9);
-  const horizontalAccuracy = median(samples
-    .map((sample) => nonNegative(numberValue(asObject(sample.location)?.horizontalAccuracy)))
-    .filter((value): value is number => value !== null));
+  const horizontalAccuracy = median(
+    samples
+      .map((sample) => nonNegative(numberValue(asObject(sample.location)?.horizontalAccuracy)))
+      .filter((value): value is number => value !== null),
+  );
   const effectiveRadius = radius === null ? null : Math.max(radius, horizontalAccuracy ?? 0);
   const stationaryRatio = samples.filter((sample) => sampleActivity(sample) === "stationary").length / samples.length;
-  const movingRatio = samples.filter((sample) => {
-    const activity = sampleActivity(sample);
-    return activity !== null && activity !== "stationary" && activity !== "uncertain" && activity !== "unknown";
-  }).length / samples.length;
+  const movingRatio =
+    samples.filter((sample) => {
+      const activity = sampleActivity(sample);
+      return activity !== null && activity !== "stationary" && activity !== "uncertain" && activity !== "unknown";
+    }).length / samples.length;
 
-  if (centerLat !== null && centerLon !== null && effectiveRadius !== null && effectiveRadius <= 200 && stationaryRatio >= 0.5) {
-    const placeId = matchingArcPlaceId(state, centerLat, centerLon, Math.max(10, effectiveRadius));
-    const stayRadius = Math.max(10, effectiveRadius, placeId ? state.arcPlaces.get(placeId)?.radius ?? 0 : 0);
-    importArcTimelineItem({
-      itemId: `reconstructed-stay:${reconstructedStart}`,
-      isVisit: true,
-      startDate: new Date(reconstructedStart * 1000).toISOString(),
-      endDate: new Date(reconstructedEnd * 1000).toISOString(),
-      center: { latitude: centerLat, longitude: centerLon },
-      radius: { mean: stayRadius },
-      placeId,
-      secondsFromGMT: timezoneOffsetValue(samples[0]?.secondsFromGMT)
-        ?? (placeId ? state.arcPlaces.get(placeId)?.timezoneOffset : null),
-      samples: [samples[0]!]
-    }, state, "arc_reconstruction", false);
+  if (
+    centerLat !== null &&
+    centerLon !== null &&
+    effectiveRadius !== null &&
+    effectiveRadius <= maximumReconstructedStayRadiusM &&
+    stationaryRatio >= 0.5
+  ) {
+    const placeId = matchingArcPlaceId(
+      state,
+      centerLat,
+      centerLon,
+      Math.max(minimumReconstructedStayRadiusM, effectiveRadius),
+    );
+    const stayRadius = Math.max(
+      minimumReconstructedStayRadiusM,
+      effectiveRadius,
+      placeId ? (state.arcPlaces.get(placeId)?.radius ?? 0) : 0,
+    );
+    importArcTimelineItem(
+      {
+        itemId: `reconstructed-stay:${reconstructedStart}`,
+        isVisit: true,
+        startDate: new Date(reconstructedStart * 1000).toISOString(),
+        endDate: new Date(reconstructedEnd * 1000).toISOString(),
+        center: { latitude: centerLat, longitude: centerLon },
+        radius: { mean: stayRadius },
+        placeId,
+        secondsFromGMT:
+          timezoneOffsetValue(samples[0]?.secondsFromGMT) ??
+          (placeId ? state.arcPlaces.get(placeId)?.timezoneOffset : null),
+        samples: [samples[0]!],
+      },
+      state,
+      providers.arcReconstruction,
+      false,
+    );
     recordDiagnostic(state, "Reconstructed fragmented Arc window from stationary samples");
     return;
   }
 
   const distance = calculatePathDistance(coords);
-  const plausibleMovingGeometry = movingRatio >= 0.5
-    ? routePoints.length >= 2
-    : stationaryRatio <= movingRatio
-      && geometryOnlyMoveIsSupported(routePoints, samples, reconstructedEnd - reconstructedStart);
-  if (coords.length >= 2 && distance !== null && distance >= 100 && plausibleMovingGeometry) {
+  const plausibleMovingGeometry =
+    movingRatio >= 0.5
+      ? routePoints.length >= 2
+      : stationaryRatio <= movingRatio &&
+        geometryOnlyMoveIsSupported(routePoints, samples, reconstructedEnd - reconstructedStart);
+  if (
+    coords.length >= 2 &&
+    distance !== null &&
+    distance >= minimumReconstructedMoveDistanceM &&
+    plausibleMovingGeometry
+  ) {
     const activity = samples.map(sampleActivity).find((value) => value && value !== "stationary") ?? null;
     const move = insertMove(state, {
       start: reconstructedStart,
@@ -1473,21 +1634,21 @@ function reconstructArcInterval(
       mode: mapActivityType(activity),
       distance,
       tzOffset: timezoneOffsetValue(samples[0]?.secondsFromGMT),
-      provider: "arc_reconstruction"
+      provider: providers.arcReconstruction,
     });
     insertRoutePath(
       state,
       move.id,
       coords,
-      "arc_reconstruction",
+      providers.arcReconstruction,
       routePoints.map((point) => point.ts),
-      preparedRoute.pathQuality
+      preparedRoute.pathQuality,
     );
     recordDiagnostic(state, "Reconstructed fragmented Arc window from moving samples");
     return;
   }
 
-  insertImportGap(state, reconstructedStart, reconstructedEnd, "arc_fragment_low_evidence");
+  insertImportGap(state, reconstructedStart, reconstructedEnd, timelineNote.arcFragmentLowEvidence);
   recordDiagnostic(state, "Replaced fragmented Arc window with a low-evidence gap");
 }
 
@@ -1495,42 +1656,44 @@ function matchingArcPlaceId(
   state: MutableState,
   latitude: number,
   longitude: number,
-  reconstructedRadius: number
+  reconstructedRadius: number,
 ): string | null {
   const matches = [...state.arcPlaces.entries()]
     .map(([placeId, place]) => ({
       placeId,
       distance: haversineDistance(latitude, longitude, place.center.lat, place.center.lon),
-      threshold: Math.max(50, reconstructedRadius + (place.radius ?? 50))
+      threshold: Math.max(stayMatchingBufferM, reconstructedRadius + (place.radius ?? defaultStayRadiusM)),
     }))
     .filter((candidate) => candidate.distance <= candidate.threshold && state.poiCache.has(`arc:${candidate.placeId}`))
     .sort((lhs, rhs) => lhs.distance - rhs.distance || compareStableStrings(lhs.placeId, rhs.placeId));
-  if (matches.length === 0 || matches.length > 1 && matches[1]!.distance - matches[0]!.distance < 25) {
+  if (matches.length === 0 || (matches.length > 1 && matches[1]!.distance - matches[0]!.distance < 25)) {
     return null;
   }
   return matches[0]!.placeId;
 }
 
-function geometryOnlyMoveIsSupported(
-  points: TimedRoutePoint[],
-  samples: JsonObject[],
-  duration: number
-): boolean {
+function geometryOnlyMoveIsSupported(points: TimedRoutePoint[], samples: JsonObject[], duration: number): boolean {
   if (points.length < 3 || !(duration > 0)) {
     return false;
   }
   const coords = points.map((point) => point.coord);
   const distance = calculatePathDistance(coords);
-  if (distance === null || distance < 100 || distance / duration < minimumGeometryOnlyMoveSpeedMps) {
+  if (
+    distance === null ||
+    distance < minimumReconstructedMoveDistanceM ||
+    distance / duration < minimumGeometryOnlyMoveSpeedMps
+  ) {
     return false;
   }
   const first = coords[0]!;
   const last = coords.at(-1)!;
   const displacement = haversineDistance(first[1], first[0], last[1], last[0]);
-  const horizontalAccuracy = median(samples
-    .map((sample) => nonNegative(numberValue(asObject(sample.location)?.horizontalAccuracy)))
-    .filter((value): value is number => value !== null));
-  return displacement >= Math.max(100, 2 * (horizontalAccuracy ?? 0));
+  const horizontalAccuracy = median(
+    samples
+      .map((sample) => nonNegative(numberValue(asObject(sample.location)?.horizontalAccuracy)))
+      .filter((value): value is number => value !== null),
+  );
+  return displacement >= Math.max(minimumReconstructedMoveDistanceM, 2 * (horizontalAccuracy ?? 0));
 }
 
 function insertImportGap(state: MutableState, start: number, end: number, notes: string): void {
@@ -1543,7 +1706,7 @@ function insertImportGap(state: MutableState, start: number, end: number, notes:
     end_ts: end,
     reason: "Unknown",
     uncertainty: null,
-    notes
+    notes,
   });
 }
 
@@ -1553,9 +1716,11 @@ function sampleTimestamp(sample: JsonObject): number | null {
 }
 
 function sampleActivity(sample: JsonObject): string | null {
-  return (stringValue(sample.confirmedType)
-    ?? stringValue(sample.coreMotionActivityType)
-    ?? stringValue(sample.movingState))?.trim().toLowerCase() ?? null;
+  return (
+    (stringValue(sample.confirmedType) ?? stringValue(sample.coreMotionActivityType) ?? stringValue(sample.movingState))
+      ?.trim()
+      .toLowerCase() ?? null
+  );
 }
 
 function median(values: number[]): number | null {
@@ -1574,8 +1739,9 @@ function percentile(sortedValues: number[], percentileValue: number): number | n
   return sortedValues[Math.min(sortedValues.length - 1, Math.floor((sortedValues.length - 1) * percentileValue))]!;
 }
 
-function fuseMovesEvidence(ledger: EvidenceLedger): void {
+function fuseMovesEvidence(ledger: EvidenceLedger, signal?: AbortSignal): void {
   for (const date of ledger.movesDayDates()) {
+    throwIfAborted(signal);
     const day = fuseMovesDayCandidates(ledger.movesDayCandidates(date));
     addMovesTrackPointEvidence(day, ledger);
     ledger.storeFusedMovesDay(date, day);
@@ -1584,7 +1750,7 @@ function fuseMovesEvidence(ledger: EvidenceLedger): void {
 
 function materializeMovesEvidence(days: JsonObject[], state: MutableState): void {
   for (const day of days) {
-    if (day.__fragmentRepair === true) {
+    if (day[evidenceKey.fragmentRepair] === true) {
       recordDiagnostic(state, "Collapsed dense short-duration Moves fragments into unknown timeline ranges");
     }
     importMovesDay(day, state);
@@ -1594,7 +1760,7 @@ function materializeMovesEvidence(days: JsonObject[], state: MutableState): void
 function fuseMovesDayCandidates(candidates: MovesDayCandidate[]): JsonObject {
   const repairedCandidates = candidates.map((candidate) => ({
     ...candidate,
-    day: repairFragmentedMovesDay(candidate.day)
+    day: repairFragmentedMovesDay(candidate.day),
   }));
   const sorted = [...repairedCandidates].sort((lhs, rhs) => {
     const score = compareNumericTuples(movesDayScore(lhs.day), movesDayScore(rhs.day));
@@ -1604,38 +1770,44 @@ function fuseMovesDayCandidates(candidates: MovesDayCandidate[]): JsonObject {
   let mergedDay = { ...winner.day };
   const selected: MovesSegmentCandidate[] = arrayValue(winner.day.segments).map((segment) => ({
     value: segment,
-    revision: movesRevisionValue(segment, winner.day)
+    revision: movesRevisionValue(segment, winner.day),
   }));
   for (const candidate of [...sorted].reverse().slice(1)) {
     mergedDay = mergeMissingJsonObjects(mergedDay, { ...candidate.day, segments: [] });
     for (const segment of arrayValue(candidate.day.segments)) {
       const supplement: MovesSegmentCandidate = {
         value: segment,
-        revision: movesRevisionValue(segment, candidate.day)
+        revision: movesRevisionValue(segment, candidate.day),
       };
       const supplementIndex = selected.findIndex((current) => canSupplementMovesSegment(current.value, segment));
       if (supplementIndex >= 0) {
         selected[supplementIndex] = mergeMovesSegments(selected[supplementIndex]!, supplement);
       } else {
-        const revisionConflictIndex = selected.findIndex((current) => movesSegmentsShareRevisionIdentity(current.value, segment));
+        const revisionConflictIndex = selected.findIndex((current) =>
+          movesSegmentsShareRevisionIdentity(current.value, segment),
+        );
         if (revisionConflictIndex >= 0) {
           const current = selected[revisionConflictIndex]!;
-          selected[revisionConflictIndex] = stringValue(current.value.type) === stringValue(segment.type)
-            ? mergeMovesSegments(current, supplement)
-            : preferredMovesSegment(current, supplement);
+          selected[revisionConflictIndex] =
+            stringValue(current.value.type) === stringValue(segment.type)
+              ? mergeMovesSegments(current, supplement)
+              : preferredMovesSegment(current, supplement);
         } else {
           selected.push(supplement);
         }
       }
     }
   }
-  selected.sort((lhs, rhs) => segmentStart(lhs.value) - segmentStart(rhs.value)
-    || Number(movesSegmentHasManualEvidence(rhs.value)) - Number(movesSegmentHasManualEvidence(lhs.value))
-    || compareStableStrings(canonicalJson(lhs.value), canonicalJson(rhs.value)));
+  selected.sort(
+    (lhs, rhs) =>
+      segmentStart(lhs.value) - segmentStart(rhs.value) ||
+      Number(movesSegmentHasManualEvidence(rhs.value)) - Number(movesSegmentHasManualEvidence(lhs.value)) ||
+      compareStableStrings(canonicalJson(lhs.value), canonicalJson(rhs.value)),
+  );
   return repairFragmentedMovesDay({
     ...mergedDay,
     segments: selected.map((candidate) => candidate.value),
-    summary: fuseMovesSummaries(repairedCandidates)
+    summary: fuseMovesSummaries(repairedCandidates),
   });
 }
 
@@ -1643,11 +1815,14 @@ function repairFragmentedMovesDay(day: JsonObject): JsonObject {
   const segments = arrayValue(day.segments)
     .filter((segment) => Number.isFinite(segmentStart(segment)) && Number.isFinite(segmentEnd(segment)))
     .sort((lhs, rhs) => segmentStart(lhs) - segmentStart(rhs));
-  const durations = segments.map((segment) => segmentEnd(segment) - segmentStart(segment)).filter((duration) => duration > 0);
+  const durations = segments
+    .map((segment) => segmentEnd(segment) - segmentStart(segment))
+    .filter((duration) => duration > 0);
   const nonPositiveCount = segments.filter((segment) => segmentEnd(segment) <= segmentStart(segment)).length;
-  const fragmentedByInvalidDurations = nonPositiveCount > 0 && nonPositiveCount / segments.length >= 0.4;
-  const fragmentedByShortDensity = (median(durations) ?? Number.POSITIVE_INFINITY) < 30;
-  if (segments.length < 20 || !fragmentedByInvalidDurations && !fragmentedByShortDensity) {
+  const fragmentedByInvalidDurations =
+    nonPositiveCount > 0 && nonPositiveCount / segments.length >= fragmentInvalidDurationRatio;
+  const fragmentedByShortDensity = (median(durations) ?? Number.POSITIVE_INFINITY) < fragmentMedianDurationThresholdS;
+  if (segments.length < fragmentGroupSize || (!fragmentedByInvalidDurations && !fragmentedByShortDensity)) {
     return day;
   }
 
@@ -1658,61 +1833,71 @@ function repairFragmentedMovesDay(day: JsonObject): JsonObject {
       return;
     }
     const start = fragments[0]!;
-    const end = fragments.reduce((latest, segment) => segmentEnd(segment) > segmentEnd(latest) ? segment : latest);
-    const repairedEnd = segmentEnd(end) > segmentStart(start)
-      ? end.endTime
-      : new Date((segmentStart(start) + 60) * 1_000).toISOString();
+    const end = fragments.reduce((latest, segment) => (segmentEnd(segment) > segmentEnd(latest) ? segment : latest));
+    const repairedEnd =
+      segmentEnd(end) > segmentStart(start)
+        ? end.endTime
+        : new Date((segmentStart(start) + trustedFragmentDurationS) * 1_000).toISOString();
     repaired.push({ type: "off", startTime: start.startTime, endTime: repairedEnd });
     fragments = [];
   };
   for (const segment of segments) {
-    const trusted = movesSegmentHasManualEvidence(segment) || segmentEnd(segment) - segmentStart(segment) >= 60;
+    const trusted =
+      movesSegmentHasManualEvidence(segment) || segmentEnd(segment) - segmentStart(segment) >= trustedFragmentDurationS;
     const previous = fragments.at(-1);
     if (trusted) {
       flush();
       repaired.push(segment);
     } else {
-      if (previous && segmentStart(segment) - segmentEnd(previous) > 600) {
+      if (previous && segmentStart(segment) - segmentEnd(previous) > fragmentGapThresholdS) {
         flush();
       }
       fragments.push(segment);
     }
   }
   flush();
-  return { ...day, segments: repaired, __fragmentRepair: true, __fragmentEvidence: segments };
+  return { ...day, segments: repaired, [evidenceKey.fragmentRepair]: true, [evidenceKey.fragmentEvidence]: segments };
 }
 
 function movesRevisionValue(segment: JsonObject, day: JsonObject): number {
-  return nonNegative(numberValue(segment.__auraRevision))
-    ?? parseImportTimestamp(stringValue(segment.lastUpdate) ?? stringValue(segment.lastSaved))
-    ?? parseImportTimestamp(stringValue(day.lastUpdate) ?? stringValue(day.lastSaved))
-    ?? 0;
+  return (
+    nonNegative(numberValue(segment[evidenceKey.auraRevision])) ??
+    parseImportTimestamp(stringValue(segment.lastUpdate) ?? stringValue(segment.lastSaved)) ??
+    parseImportTimestamp(stringValue(day.lastUpdate) ?? stringValue(day.lastSaved)) ??
+    0
+  );
 }
 
 function fuseMovesSummaries(candidates: MovesDayCandidate[]): JsonObject[] {
   const groups = new Map<string, Array<{ value: JsonObject; revision: number }>>();
   for (const candidate of candidates) {
     for (const summary of arrayValue(candidate.day.summary)) {
-      const revision = parseImportTimestamp(stringValue(summary.lastUpdate) ?? stringValue(summary.lastSaved))
-        ?? parseImportTimestamp(stringValue(candidate.day.lastUpdate) ?? stringValue(candidate.day.lastSaved))
-        ?? 0;
+      const revision =
+        parseImportTimestamp(stringValue(summary.lastUpdate) ?? stringValue(summary.lastSaved)) ??
+        parseImportTimestamp(stringValue(candidate.day.lastUpdate) ?? stringValue(candidate.day.lastSaved)) ??
+        0;
       const key = `${stringValue(summary.activity) ?? ""}|${stringValue(summary.group) ?? ""}`;
       const group = groups.get(key) ?? [];
       group.push({ value: summary, revision });
       groups.set(key, group);
     }
   }
-  return [...groups.values()].map((group) => {
-    const sorted = [...group].sort((lhs, rhs) => lhs.revision - rhs.revision
-      || populatedFieldCount(lhs.value) - populatedFieldCount(rhs.value)
-      || compareStableStrings(canonicalJson(lhs.value), canonicalJson(rhs.value)));
-    let fused = { ...sorted.at(-1)!.value };
-    for (const supplement of sorted.slice(0, -1).reverse()) {
-      fused = mergeMissingJsonObjects(fused, supplement.value);
-    }
-    fused.__auraRevision = sorted.at(-1)!.revision;
-    return fused;
-  }).sort((lhs, rhs) => compareStableStrings(canonicalJson(lhs), canonicalJson(rhs)));
+  return [...groups.values()]
+    .map((group) => {
+      const sorted = [...group].sort(
+        (lhs, rhs) =>
+          lhs.revision - rhs.revision ||
+          populatedFieldCount(lhs.value) - populatedFieldCount(rhs.value) ||
+          compareStableStrings(canonicalJson(lhs.value), canonicalJson(rhs.value)),
+      );
+      let fused = { ...sorted.at(-1)!.value };
+      for (const supplement of sorted.slice(0, -1).reverse()) {
+        fused = mergeMissingJsonObjects(fused, supplement.value);
+      }
+      fused[evidenceKey.auraRevision] = sorted.at(-1)!.revision;
+      return fused;
+    })
+    .sort((lhs, rhs) => compareStableStrings(canonicalJson(lhs), canonicalJson(rhs)));
 }
 
 function canSupplementMovesSegment(primary: JsonObject, supplement: JsonObject): boolean {
@@ -1723,14 +1908,18 @@ function canSupplementMovesSegment(primary: JsonObject, supplement: JsonObject):
   if (type === "place") {
     const primaryId = placeIdentifier(primary.place);
     const supplementId = placeIdentifier(supplement.place);
-    return primaryId !== null && primaryId === supplementId
-      || segmentStart(primary) === segmentStart(supplement)
-        && segmentEnd(primary) === segmentEnd(supplement)
-        && (primaryId === null || supplementId === null);
+    return (
+      (primaryId !== null && primaryId === supplementId) ||
+      (segmentStart(primary) === segmentStart(supplement) &&
+        segmentEnd(primary) === segmentEnd(supplement) &&
+        (primaryId === null || supplementId === null))
+    );
   }
-  return type === "move"
-    && segmentStart(primary) === segmentStart(supplement)
-    && segmentEnd(primary) === segmentEnd(supplement);
+  return (
+    type === "move" &&
+    segmentStart(primary) === segmentStart(supplement) &&
+    segmentEnd(primary) === segmentEnd(supplement)
+  );
 }
 
 function sameMovesSegmentWindow(lhs: JsonObject, rhs: JsonObject): boolean {
@@ -1749,10 +1938,10 @@ function movesSegmentsShareRevisionIdentity(lhs: JsonObject, rhs: JsonObject): b
   const rhsDuration = rhsEnd - rhsStart;
   const intersection = Math.min(lhsEnd, rhsEnd) - Math.max(lhsStart, rhsStart);
   if (
-    !(lhsDuration > 0)
-    || !(rhsDuration > 0)
-    || intersection / Math.min(lhsDuration, rhsDuration) < 0.8
-    || Math.max(lhsDuration, rhsDuration) / Math.min(lhsDuration, rhsDuration) > 1.5
+    !(lhsDuration > 0) ||
+    !(rhsDuration > 0) ||
+    intersection / Math.min(lhsDuration, rhsDuration) < 0.8 ||
+    Math.max(lhsDuration, rhsDuration) / Math.min(lhsDuration, rhsDuration) > 1.5
   ) {
     return false;
   }
@@ -1761,7 +1950,10 @@ function movesSegmentsShareRevisionIdentity(lhs: JsonObject, rhs: JsonObject): b
   return lhsPlaceId === null || rhsPlaceId === null || lhsPlaceId === rhsPlaceId;
 }
 
-function preferredMovesSegment(primary: MovesSegmentCandidate, supplement: MovesSegmentCandidate): MovesSegmentCandidate {
+function preferredMovesSegment(
+  primary: MovesSegmentCandidate,
+  supplement: MovesSegmentCandidate,
+): MovesSegmentCandidate {
   const primaryManual = movesSegmentHasManualEvidence(primary.value);
   const supplementManual = movesSegmentHasManualEvidence(supplement.value);
   if (supplementManual !== primaryManual) {
@@ -1777,7 +1969,11 @@ function mergeMissingJsonObjects(primary: JsonObject, supplement: JsonObject): J
     const supplementObject = asObject(value);
     if (currentObject && supplementObject) {
       merged[key] = mergeMissingJsonObjects(currentObject, supplementObject);
-    } else if (merged[key] === null || merged[key] === undefined || Array.isArray(merged[key]) && (merged[key] as unknown[]).length === 0) {
+    } else if (
+      merged[key] === null ||
+      merged[key] === undefined ||
+      (Array.isArray(merged[key]) && (merged[key] as unknown[]).length === 0)
+    ) {
       merged[key] = value;
     }
   }
@@ -1787,53 +1983,63 @@ function mergeMissingJsonObjects(primary: JsonObject, supplement: JsonObject): J
 function mergeMovesSegments(primary: MovesSegmentCandidate, supplement: MovesSegmentCandidate): MovesSegmentCandidate {
   const primaryManual = movesSegmentHasManualEvidence(primary.value);
   const supplementManual = movesSegmentHasManualEvidence(supplement.value);
-  const supplementWins = supplementManual && !primaryManual
-    || supplementManual === primaryManual && supplement.revision > primary.revision;
+  const supplementWins =
+    (supplementManual && !primaryManual) ||
+    (supplementManual === primaryManual && supplement.revision > primary.revision);
   const preferred = supplementWins ? supplement : primary;
   const fallback = supplementWins ? primary : supplement;
   const merged = mergeMissingJsonObjects(preferred.value, fallback.value);
   merged.trackPoints = fuseMovesTrackPoints([
     { points: arrayValue(primary.value.trackPoints), revision: primary.revision },
-    { points: arrayValue(supplement.value.trackPoints), revision: supplement.revision }
+    { points: arrayValue(supplement.value.trackPoints), revision: supplement.revision },
   ]);
   if (stringValue(preferred.value.type) === "move") {
     merged.activities = fuseMovesActivityCandidates([
       ...arrayValue(primary.value.activities).map((activity) => ({
         value: activity,
-        revision: activityRevisionValue(activity, primary.revision)
+        revision: activityRevisionValue(activity, primary.revision),
       })),
       ...arrayValue(supplement.value.activities).map((activity) => ({
         value: activity,
-        revision: activityRevisionValue(activity, supplement.revision)
-      }))
+        revision: activityRevisionValue(activity, supplement.revision),
+      })),
     ]);
   }
-  merged.__auraRevision = preferred.revision;
+  merged[evidenceKey.auraRevision] = preferred.revision;
   return { value: merged, revision: preferred.revision };
 }
 
 function fuseMovesActivities(activities: JsonObject[]): JsonObject[] {
-  return fuseMovesActivityCandidates(activities.map((value) => ({
-    value,
-    revision: activityRevisionValue(value, 0)
-  })));
+  return fuseMovesActivityCandidates(
+    activities.map((value) => ({
+      value,
+      revision: activityRevisionValue(value, 0),
+    })),
+  );
 }
 
 function activityRevisionValue(activity: JsonObject, parentRevision: number): number {
-  return nonNegative(numberValue(activity.__auraRevision))
-    ?? parseImportTimestamp(stringValue(activity.lastUpdate) ?? stringValue(activity.lastSaved))
-    ?? parentRevision;
+  return (
+    nonNegative(numberValue(activity[evidenceKey.auraRevision])) ??
+    parseImportTimestamp(stringValue(activity.lastUpdate) ?? stringValue(activity.lastSaved)) ??
+    parentRevision
+  );
 }
 
 function fuseMovesActivityCandidates(activities: MovesActivityCandidate[]): JsonObject[] {
   const groups: MovesActivityCandidate[][] = [];
-  const ordered = [...activities].sort((lhs, rhs) => segmentStart(lhs.value) - segmentStart(rhs.value)
-    || segmentEnd(lhs.value) - segmentEnd(rhs.value)
-    || lhs.revision - rhs.revision
-    || compareStableStrings(canonicalJson(lhs.value), canonicalJson(rhs.value)));
+  const ordered = [...activities].sort(
+    (lhs, rhs) =>
+      segmentStart(lhs.value) - segmentStart(rhs.value) ||
+      segmentEnd(lhs.value) - segmentEnd(rhs.value) ||
+      lhs.revision - rhs.revision ||
+      compareStableStrings(canonicalJson(lhs.value), canonicalJson(rhs.value)),
+  );
   for (const activity of ordered) {
     const matchingGroupIndexes = groups
-      .map((group, index) => group.some((candidate) => movesSegmentsShareRevisionIdentity(candidate.value, activity.value)) ? index : -1)
+      .map((group, index) =>
+        group.some((candidate) => movesSegmentsShareRevisionIdentity(candidate.value, activity.value)) ? index : -1,
+      )
       .filter((index) => index >= 0);
     if (matchingGroupIndexes.length === 0) {
       groups.push([activity]);
@@ -1846,55 +2052,73 @@ function fuseMovesActivityCandidates(activities: MovesActivityCandidate[]): Json
     }
     groups.push(merged);
   }
-  return groups.map((group) => {
-    const sorted = [...group].sort((lhs, rhs) => Number(lhs.value.manual === true) - Number(rhs.value.manual === true)
-      || lhs.revision - rhs.revision
-      || populatedFieldCount(lhs.value) - populatedFieldCount(rhs.value)
-      || compareStableStrings(canonicalJson(lhs.value), canonicalJson(rhs.value)));
-    let fused = { ...sorted.at(-1)!.value };
-    for (const supplement of sorted.slice(0, -1).reverse()) {
-      if (canSupplementMovesActivity(fused, supplement.value)) {
-        fused = mergeMissingJsonObjects(fused, supplement.value);
+  return groups
+    .map((group) => {
+      const sorted = [...group].sort(
+        (lhs, rhs) =>
+          Number(lhs.value.manual === true) - Number(rhs.value.manual === true) ||
+          lhs.revision - rhs.revision ||
+          populatedFieldCount(lhs.value) - populatedFieldCount(rhs.value) ||
+          compareStableStrings(canonicalJson(lhs.value), canonicalJson(rhs.value)),
+      );
+      let fused = { ...sorted.at(-1)!.value };
+      for (const supplement of sorted.slice(0, -1).reverse()) {
+        if (canSupplementMovesActivity(fused, supplement.value)) {
+          fused = mergeMissingJsonObjects(fused, supplement.value);
+        }
       }
-    }
-    fused.trackPoints = fuseMovesTrackPoints(sorted.map((candidate) => ({
-      points: arrayValue(candidate.value.trackPoints),
-      revision: candidate.revision
-    })));
-    fused.__auraRevision = sorted.at(-1)!.revision;
-    return fused;
-  }).sort((lhs, rhs) => segmentStart(lhs) - segmentStart(rhs)
-    || Number(rhs.manual === true) - Number(lhs.manual === true)
-    || compareStableStrings(canonicalJson(lhs), canonicalJson(rhs)));
+      fused.trackPoints = fuseMovesTrackPoints(
+        sorted.map((candidate) => ({
+          points: arrayValue(candidate.value.trackPoints),
+          revision: candidate.revision,
+        })),
+      );
+      fused[evidenceKey.auraRevision] = sorted.at(-1)!.revision;
+      return fused;
+    })
+    .sort(
+      (lhs, rhs) =>
+        segmentStart(lhs) - segmentStart(rhs) ||
+        Number(rhs.manual === true) - Number(lhs.manual === true) ||
+        compareStableStrings(canonicalJson(lhs), canonicalJson(rhs)),
+    );
 }
 
 function fuseMovesTrackPoints(candidates: Array<{ points: JsonObject[]; revision: number }>): JsonObject[] {
-  const timestamped = candidates.flatMap((candidate) => candidate.points.map((point) => ({
-    point,
-    revision: candidate.revision,
-    timestamp: parseImportTimestamp(stringValue(point.time) ?? stringValue(point.timestamp))
-  }))).filter((candidate): candidate is { point: JsonObject; revision: number; timestamp: number } => candidate.timestamp !== null);
+  const timestamped = candidates
+    .flatMap((candidate) =>
+      candidate.points.map((point) => ({
+        point,
+        revision: candidate.revision,
+        timestamp: parseImportTimestamp(stringValue(point.time) ?? stringValue(point.timestamp)),
+      })),
+    )
+    .filter(
+      (candidate): candidate is { point: JsonObject; revision: number; timestamp: number } =>
+        candidate.timestamp !== null,
+    );
   if (timestamped.length === 0) {
-    return [...candidates]
-      .sort((lhs, rhs) => lhs.revision - rhs.revision || lhs.points.length - rhs.points.length)
-      .at(-1)?.points ?? [];
+    return (
+      [...candidates].sort((lhs, rhs) => lhs.revision - rhs.revision || lhs.points.length - rhs.points.length).at(-1)
+        ?.points ?? []
+    );
   }
   const selected = new Map<number, { point: JsonObject; revision: number }>();
-  for (const candidate of timestamped.sort((lhs, rhs) => lhs.revision - rhs.revision
-    || compareStableStrings(canonicalJson(lhs.point), canonicalJson(rhs.point)))) {
+  for (const candidate of timestamped.sort(
+    (lhs, rhs) =>
+      lhs.revision - rhs.revision || compareStableStrings(canonicalJson(lhs.point), canonicalJson(rhs.point)),
+  )) {
     selected.set(candidate.timestamp, { point: candidate.point, revision: candidate.revision });
   }
-  return [...selected.entries()]
-    .sort(([lhs], [rhs]) => lhs - rhs)
-    .map(([, candidate]) => candidate.point);
+  return [...selected.entries()].sort(([lhs], [rhs]) => lhs - rhs).map(([, candidate]) => candidate.point);
 }
 
 function canSupplementMovesActivity(primary: JsonObject, supplement: JsonObject): boolean {
   const primaryMode = stringValue(primary.activity);
   const supplementMode = stringValue(supplement.activity);
-  return primaryMode === null
-    || supplementMode === null
-    || mapActivityType(primaryMode) === mapActivityType(supplementMode);
+  return (
+    primaryMode === null || supplementMode === null || mapActivityType(primaryMode) === mapActivityType(supplementMode)
+  );
 }
 
 function movesSegmentHasManualEvidence(segment: JsonObject): boolean {
@@ -1908,7 +2132,7 @@ function movesDayScore(day: JsonObject): readonly number[] {
   const durations = segments.map((segment) => segmentEnd(segment) - segmentStart(segment));
   const coverage = durations.reduce((sum, duration) => sum + Math.max(0, duration), 0);
   const medianDuration = median(durations.filter((duration) => duration > 0)) ?? 0;
-  const isFragmented = segments.length >= 20 && medianDuration < 30;
+  const isFragmented = segments.length >= fragmentGroupSize && medianDuration < fragmentMedianDurationThresholdS;
   return [
     durations.every((duration) => duration > 0) ? 1 : 0,
     overlapCount === 0 ? 1 : 0,
@@ -1916,7 +2140,7 @@ function movesDayScore(day: JsonObject): readonly number[] {
     segments.filter(movesSegmentHasManualEvidence).length,
     coverage,
     populatedFieldCount(day),
-    segments.length
+    segments.length,
   ];
 }
 
@@ -1957,7 +2181,7 @@ function normalizeMovesDay(day: JsonObject): JsonObject {
 
 function addMovesTrackPointEvidence(day: JsonObject, ledger: EvidenceLedger): void {
   const date = stringValue(day.date) ?? "unknown";
-  const segments = [...arrayValue(day.segments), ...arrayValue(day.__fragmentEvidence)];
+  const segments = [...arrayValue(day.segments), ...arrayValue(day[evidenceKey.fragmentEvidence])];
   for (const [index, segment] of segments.entries()) {
     const parentItemId = `moves:${date}:${index}:${segmentStart(segment)}`;
     addMovesTrackPoints(arrayValue(segment.trackPoints), ledger, parentItemId);
@@ -1974,15 +2198,19 @@ function addMovesTrackPoints(points: JsonObject[], ledger: EvidenceLedger, paren
     if (!timestamp) {
       continue;
     }
-    addArcObservation({
-      date: timestamp,
-      secondsFromGMT: offset,
-      location: {
-        timestamp,
-        latitude: point.lat ?? point.latitude,
-        longitude: point.lon ?? point.longitude
-      }
-    }, parentItemId, ledger);
+    addArcObservation(
+      {
+        date: timestamp,
+        secondsFromGMT: offset,
+        location: {
+          timestamp,
+          latitude: point.lat ?? point.latitude,
+          longitude: point.lon ?? point.longitude,
+        },
+      },
+      parentItemId,
+      ledger,
+    );
   }
 }
 
@@ -1995,13 +2223,13 @@ function importArcTimelineItem(
   item: JsonObject,
   state: MutableState,
   provider: string,
-  importRawEvidence = true
+  importRawEvidence = true,
 ): void {
   const samples = arrayValue(item.samples);
   const tzOffset = timezoneOffsetValue(samples[0]?.secondsFromGMT) ?? timezoneOffsetValue(item.secondsFromGMT);
   const itemId = stringValue(item.itemId);
   if (item.isVisit === true) {
-    const stayId = importArcStay(item, state, tzOffset, provider !== "arc_reconstruction");
+    const stayId = importArcStay(item, state, tzOffset, provider !== providers.arcReconstruction);
     if (itemId && stayId !== null) {
       state.itemMap.set(itemId, { kind: "stay", ids: [stayId] });
     }
@@ -2020,7 +2248,7 @@ function importArcStay(
   item: JsonObject,
   state: MutableState,
   tzOffset: number | null,
-  recordRawVisit: boolean
+  recordRawVisit: boolean,
 ): number | null {
   const start = parseImportTimestamp(stringValue(item.startDate));
   const end = parseImportTimestamp(stringValue(item.endDate));
@@ -2037,19 +2265,20 @@ function importArcStay(
   const placeId = stringValue(item.placeId) ?? stringValue(place?.placeId);
   const storedPlace = placeId ? state.arcPlaces.get(placeId) : null;
   const samples = arrayValue(item.samples);
-  const center = locationFrom(item.center)
-    ?? locationFrom(place?.center)
-    ?? locationFrom(place?.location)
-    ?? storedPlace?.center
-    ?? locationFrom(samples[0]?.location)
-    ?? locationFrom(samples[0]);
+  const center =
+    locationFrom(item.center) ??
+    locationFrom(place?.center) ??
+    locationFrom(place?.location) ??
+    storedPlace?.center ??
+    locationFrom(samples[0]?.location) ??
+    locationFrom(samples[0]);
   if (!center) {
     recordDiagnostic(state, "Skipped stay without coordinates");
     return null;
   }
 
   const radius = asObject(item.radius);
-  const radiusMeters = positiveNumber(numberValue(radius?.mean)) ?? storedPlace?.radius ?? 50;
+  const radiusMeters = positiveNumber(numberValue(radius?.mean)) ?? storedPlace?.radius ?? defaultStayRadiusM;
   const poiId = getOrCreateArcPoi(item, state, start);
   const type = asObject(item.place)?.isHome === true ? "anchor" : "venue";
 
@@ -2062,13 +2291,13 @@ function importArcStay(
     radius_m: radiusMeters,
     type,
     poi_id: poiId,
-    tz_offset_s: tzOffset
+    tz_offset_s: tzOffset,
   };
   state.rows.stays.push(row);
   recordSemanticEvidence(state, "stay", row.id, {
     manual: item.manualPlace === true || item.manualActivityType === true,
     revision: revisionValue(item),
-    source: "arc"
+    source: "arc",
   });
 
   if (poiId !== null) {
@@ -2082,14 +2311,19 @@ function importArcStay(
       lat: center.lat,
       lon: center.lon,
       horizontal_acc_m: positiveNumber(numberValue(radius?.mean)),
-      tz_offset_s: tzOffset
+      tz_offset_s: tzOffset,
     });
   }
 
   return row.id;
 }
 
-function importArcMove(item: JsonObject, state: MutableState, tzOffset: number | null, provider: string): number | null {
+function importArcMove(
+  item: JsonObject,
+  state: MutableState,
+  tzOffset: number | null,
+  provider: string,
+): number | null {
   const start = parseImportTimestamp(stringValue(item.startDate));
   const end = parseImportTimestamp(stringValue(item.endDate));
   if (start !== null && end !== null && end <= start) {
@@ -2104,7 +2338,7 @@ function importArcMove(item: JsonObject, state: MutableState, tzOffset: number |
   const samples = samplesWithinWindow(arrayValue(item.samples), start, end);
   const activity = isLowConfidenceArcItem(item)
     ? stringValue(item.confirmedType)
-    : stringValue(item.activityType) ?? stringValue(item.confirmedType);
+    : (stringValue(item.activityType) ?? stringValue(item.confirmedType));
   const mode = activity ? mapActivityType(activity) : dominantArcSampleMoveMode(samples);
 
   const preparedRoute = prepareRouteFromSamples(samples);
@@ -2119,7 +2353,7 @@ function importArcMove(item: JsonObject, state: MutableState, tzOffset: number |
     tzOffset,
     provider,
     manual: item.manualActivityType === true || stringValue(item.confirmedType) !== null,
-    revision: revisionValue(item)
+    revision: revisionValue(item),
   });
   if (coords.length >= 2) {
     insertRoutePath(
@@ -2128,7 +2362,7 @@ function importArcMove(item: JsonObject, state: MutableState, tzOffset: number |
       coords,
       provider,
       routePoints.map((point) => point.ts),
-      preparedRoute.pathQuality
+      preparedRoute.pathQuality,
     );
   }
   return row.id;
@@ -2150,8 +2384,9 @@ function dominantArcSampleMoveMode(samples: JsonObject[]): MoveMode {
   for (const value of evidence.filter((candidate) => candidate.rank === strongestRank)) {
     counts.set(value.mode, (counts.get(value.mode) ?? 0) + 1);
   }
-  return [...counts.entries()]
-    .sort((lhs, rhs) => rhs[1] - lhs[1] || compareStableStrings(lhs[0], rhs[0]))[0]?.[0] ?? "other";
+  return (
+    [...counts.entries()].sort((lhs, rhs) => rhs[1] - lhs[1] || compareStableStrings(lhs[0], rhs[0]))[0]?.[0] ?? "other"
+  );
 }
 
 function importArcPlace(place: JsonObject, state: MutableState): number | null {
@@ -2165,7 +2400,7 @@ function importArcPlace(place: JsonObject, state: MutableState): number | null {
   state.arcPlaces.set(placeId, {
     center,
     radius,
-    timezoneOffset: timezoneOffsetValue(place.secondsFromGMT)
+    timezoneOffset: timezoneOffsetValue(place.secondsFromGMT),
   });
   const name = meaningfulName(place.name);
   if (!name) {
@@ -2181,7 +2416,7 @@ function importArcPlace(place: JsonObject, state: MutableState): number | null {
     radius,
     seenTs: null,
     thoroughfare: stringValue(place.streetAddress),
-    revision: revisionValue(place)
+    revision: revisionValue(place),
   });
 }
 
@@ -2190,8 +2425,9 @@ function importArcBackupTimelineItem(item: JsonObject, state: MutableState): voi
   const start = parseImportTimestamp(stringValue(item.startDate));
   const end = parseImportTimestamp(stringValue(item.endDate));
   const placeId = stringValue(item.placeId);
-  const tzOffset = timezoneOffsetValue(item.secondsFromGMT)
-    ?? (placeId ? state.arcPlaces.get(placeId)?.timezoneOffset ?? null : null);
+  const tzOffset =
+    timezoneOffsetValue(item.secondsFromGMT) ??
+    (placeId ? (state.arcPlaces.get(placeId)?.timezoneOffset ?? null) : null);
   if (!itemId || start === null || end === null || !validWindow(start, end)) {
     recordDiagnostic(state, "Skipped backup timeline item with invalid time window");
     return;
@@ -2202,10 +2438,10 @@ function importArcBackupTimelineItem(item: JsonObject, state: MutableState): voi
   }
 
   if (item.isVisit === true) {
-    const poiId = placeId ? state.poiCache.get(`arc:${placeId}`) ?? null : null;
-    const poi = poiId ? state.rows.pois.find((row) => row.id === poiId) ?? null : null;
+    const poiId = placeId ? (state.poiCache.get(`arc:${placeId}`) ?? null) : null;
+    const poi = poiId ? (state.rows.pois.find((row) => row.id === poiId) ?? null) : null;
     const place = placeId ? state.arcPlaces.get(placeId) : null;
-    const center = poi ? { lat: poi.lat, lon: poi.lon } : place?.center ?? locationFrom(item.center);
+    const center = poi ? { lat: poi.lat, lon: poi.lon } : (place?.center ?? locationFrom(item.center));
     if (!center) {
       recordDiagnostic(state, "Skipped backup stay without coordinates");
       return;
@@ -2216,16 +2452,16 @@ function importArcBackupTimelineItem(item: JsonObject, state: MutableState): voi
       end_ts: end,
       centroid_lat: center.lat,
       centroid_lon: center.lon,
-      radius_m: poi?.radius_m ?? place?.radius ?? 50,
+      radius_m: poi?.radius_m ?? place?.radius ?? defaultStayRadiusM,
       type: "venue",
       poi_id: poiId,
-      tz_offset_s: tzOffset
+      tz_offset_s: tzOffset,
     };
     state.rows.stays.push(stay);
     recordSemanticEvidence(state, "stay", stay.id, {
       manual: item.manualPlace === true || item.manualActivityType === true,
       revision: revisionValue(item),
-      source: "arc"
+      source: "arc",
     });
     if (poiId !== null) {
       state.rows.stay_pois.push({ stay_id: stay.id, poi_id: poiId, role: "primary", distance_m: null });
@@ -2239,7 +2475,7 @@ function importArcBackupTimelineItem(item: JsonObject, state: MutableState): voi
       lat: center.lat,
       lon: center.lon,
       horizontal_acc_m: poi?.radius_m ?? place?.radius ?? null,
-      tz_offset_s: tzOffset
+      tz_offset_s: tzOffset,
     });
     state.itemMap.set(itemId, { kind: "stay", ids: [stay.id] });
   } else {
@@ -2249,9 +2485,9 @@ function importArcBackupTimelineItem(item: JsonObject, state: MutableState): voi
       mode: mapActivityType(stringValue(item.activityType)),
       distance: null,
       tzOffset,
-      provider: "arc_backup",
+      provider: providers.arcBackup,
       manual: item.manualActivityType === true || stringValue(item.confirmedType) !== null,
-      revision: revisionValue(item)
+      revision: revisionValue(item),
     });
     state.itemMap.set(itemId, { kind: "move", ids: [move.id] });
   }
@@ -2264,7 +2500,7 @@ function insertRawVisit(state: MutableState, input: Omit<RawVisitRow, "id">): vo
     input.lat,
     input.lon,
     input.horizontal_acc_m,
-    input.tz_offset_s
+    input.tz_offset_s,
   ]);
   if (state.rawVisitKeys.has(key)) {
     return;
@@ -2292,9 +2528,9 @@ function importArcBackupRoutes(samples: JsonObject[], state: MutableState): void
         const move = state.rows.moves.find((row) => row.id === moveId);
         const routeSamples = move
           ? group.filter((sample) => {
-            const ts = sampleTimestamp(sample);
-            return ts !== null && ts >= move.start_ts && (move.end_ts === null || ts <= move.end_ts);
-          })
+              const ts = sampleTimestamp(sample);
+              return ts !== null && ts >= move.start_ts && (move.end_ts === null || ts <= move.end_ts);
+            })
           : [];
         const preparedRoute = prepareRouteFromSamples(routeSamples);
         const routePoints = preparedRoute.points;
@@ -2312,9 +2548,9 @@ function importArcBackupRoutes(samples: JsonObject[], state: MutableState): void
               state,
               move.id,
               coords,
-              "arc_backup",
+              providers.arcBackup,
               routePoints.map((point) => point.ts),
-              preparedRoute.pathQuality
+              preparedRoute.pathQuality,
             );
           }
         }
@@ -2333,7 +2569,7 @@ function importMovesDay(day: JsonObject, state: MutableState): void {
     state.movesSummaryStepTotals.set(movesDateKey, summarySteps);
   }
   const claimCountBefore = state.pedometerClaims.length;
-  for (const segment of arrayValue(day.__fragmentEvidence)) {
+  for (const segment of arrayValue(day[evidenceKey.fragmentEvidence])) {
     importMovesNestedPedometer(segment, state, movesDateKey);
   }
   const segments = arrayValue(day.segments);
@@ -2363,8 +2599,7 @@ function importMovesDay(day: JsonObject, state: MutableState): void {
       importMovesOff(segment, state);
     }
   }
-  const dayClaims = state.pedometerClaims.slice(claimCountBefore)
-    .filter((claim) => claim.source === "moves");
+  const dayClaims = state.pedometerClaims.slice(claimCountBefore).filter((claim) => claim.source === "moves");
   const leafSteps = dayClaims.reduce((sum, claim) => sum + (claim.steps ?? 0), 0);
   if (leafSteps === 0) {
     importMovesSummaryPedometer(day, state, movesDateKey);
@@ -2378,23 +2613,23 @@ function importMovesDay(day: JsonObject, state: MutableState): void {
       const endTime = arrayValue(day.segments)
         .map((segment) => stringValue(segment.endTime))
         .find((value) => parseImportTimestamp(value) === timestamp);
-      importMovesPedometer({
-        steps: summarySteps - leafSteps,
-        distance: Math.max(0, summaryDistance - leafDistance),
-        endTime
-      }, timestamp, state, movesDateKey);
+      importMovesPedometer(
+        {
+          steps: summarySteps - leafSteps,
+          distance: Math.max(0, summaryDistance - leafDistance),
+          endTime,
+        },
+        timestamp,
+        state,
+        movesDateKey,
+      );
     }
   }
 }
 
-function importMovesActivitiesOnlyPlace(
-  segment: JsonObject,
-  state: MutableState,
-  start: number,
-  end: number
-): void {
+function importMovesActivitiesOnlyPlace(segment: JsonObject, state: MutableState, start: number, end: number): void {
   if (!hasSemanticCoverage(state, start, end)) {
-    insertImportGap(state, start, end, "moves_place_without_location");
+    insertImportGap(state, start, end, timelineNote.movesPlaceWithoutLocation);
   }
   for (const activity of fuseMovesActivities(arrayValue(segment.activities))) {
     const activityStart = parseImportTimestamp(stringValue(activity.startTime));
@@ -2402,18 +2637,22 @@ function importMovesActivitiesOnlyPlace(
     if (activityStart === null || activityEnd === null || !validWindow(activityStart, activityEnd)) {
       continue;
     }
-    importMovesMove({
-      type: "move",
-      startTime: activity.startTime,
-      endTime: activity.endTime,
-      activities: [activity]
-    }, state);
+    importMovesMove(
+      {
+        type: "move",
+        startTime: activity.startTime,
+        endTime: activity.endTime,
+        activities: [activity],
+      },
+      state,
+    );
   }
 }
 
 function hasSemanticCoverage(state: MutableState, start: number, end: number): boolean {
-  return [...state.rows.stays, ...state.rows.moves, ...state.rows.no_data_gaps]
-    .some((row) => row.start_ts < end && (row.end_ts ?? Number.POSITIVE_INFINITY) > start);
+  return [...state.rows.stays, ...state.rows.moves, ...state.rows.no_data_gaps].some(
+    (row) => row.start_ts < end && (row.end_ts ?? Number.POSITIVE_INFINITY) > start,
+  );
 }
 
 function canMaterializeMovesSegment(segment: JsonObject, type: string | null, start: number, end: number): boolean {
@@ -2428,10 +2667,12 @@ function canMaterializeMovesSegment(segment: JsonObject, type: string | null, st
   }
   const activities = arrayValue(segment.activities);
   if (activities.length === 0) {
-    return stringValue(segment.activity) !== null
-      || positiveNumber(numberValue(segment.distance)) !== null
-      || coordinatesFromTrackPoints(arrayValue(segment.trackPoints), start, end).length >= 2
-      || segment.manual === true;
+    return (
+      stringValue(segment.activity) !== null ||
+      positiveNumber(numberValue(segment.distance)) !== null ||
+      coordinatesFromTrackPoints(arrayValue(segment.trackPoints), start, end).length >= 2 ||
+      segment.manual === true
+    );
   }
   return activities.some((activity) => {
     const activityStart = parseImportTimestamp(stringValue(activity.startTime));
@@ -2444,7 +2685,7 @@ function matchingStayEvidence(
   segment: JsonObject,
   state: MutableState,
   start: number,
-  end: number
+  end: number,
 ): ReplacedStayEvidence | null {
   const center = locationFrom(asObject(segment.place)?.location);
   if (!center) {
@@ -2458,16 +2699,16 @@ function matchingStayEvidence(
       continue;
     }
     const distance = haversineDistance(center.lat, center.lon, stay.centroid_lat, stay.centroid_lon);
-    if (distance > Math.max(50, stay.radius_m + 50)) {
+    if (distance > Math.max(stayMatchingBufferM, stay.radius_m + stayMatchingBufferM)) {
       continue;
     }
     const evidence = {
       poiId: stay.poi_id,
       radius: stay.radius_m,
       type: stay.type,
-      distance
+      distance,
     };
-    if (!best || overlap > best.overlap || overlap === best.overlap && distance < best.evidence.distance) {
+    if (!best || overlap > best.overlap || (overlap === best.overlap && distance < best.evidence.distance)) {
       best = { evidence, overlap };
     }
   }
@@ -2487,7 +2728,7 @@ function importMovesOff(segment: JsonObject, state: MutableState): void {
     end_ts: end,
     reason: "Unknown",
     uncertainty: null,
-    notes: "moves_tracking_off"
+    notes: timelineNote.movesTrackingOff,
   });
 }
 
@@ -2504,21 +2745,20 @@ function importMovesPlace(segment: JsonObject, state: MutableState, replacedStay
   const movesPlaceId = movesIdentity.id;
   const name = meaningfulName(place.name);
   const placeType = stringValue(place.type)?.toLowerCase() ?? null;
-  const category = placeType ?? (Array.isArray(place.foursquareCategoryIds)
-    ? stringValue(place.foursquareCategoryIds[0])
-    : null);
+  const category =
+    placeType ?? (Array.isArray(place.foursquareCategoryIds) ? stringValue(place.foursquareCategoryIds[0]) : null);
   const movesPoiId = movesPlaceId
     ? resolveMovesPoi(
-      state,
-      movesPlaceId,
-      movesIdentity.rank,
-      movesIdentity.aliases,
-      name,
-      category,
-      center,
-      start,
-      parseImportTimestamp(stringValue(segment.lastUpdate)) ?? start
-    )
+        state,
+        movesPlaceId,
+        movesIdentity.rank,
+        movesIdentity.aliases,
+        name,
+        category,
+        center,
+        start,
+        parseImportTimestamp(stringValue(segment.lastUpdate)) ?? start,
+      )
     : null;
   const poiId = movesPoiId ?? replacedStay?.poiId ?? null;
 
@@ -2528,27 +2768,33 @@ function importMovesPlace(segment: JsonObject, state: MutableState, replacedStay
     end_ts: end,
     centroid_lat: center.lat,
     centroid_lon: center.lon,
-    radius_m: replacedStay?.radius ?? 50,
-    type: placeType === "home" || placeType === "work" || placeType === "school"
-      ? "anchor"
-      : replacedStay?.type ?? "venue",
+    radius_m: replacedStay?.radius ?? defaultStayRadiusM,
+    type:
+      placeType === "home" || placeType === "work" || placeType === "school"
+        ? "anchor"
+        : (replacedStay?.type ?? "venue"),
     poi_id: poiId,
-    tz_offset_s: extractTimezoneOffsetSeconds(stringValue(segment.startTime))
+    tz_offset_s: extractTimezoneOffsetSeconds(stringValue(segment.startTime)),
   };
   state.rows.stays.push(stay);
   recordSemanticEvidence(state, "stay", stay.id, {
     manual: segment.manual === true,
     revision: movesRevisionValue(segment, segment),
-    source: "moves"
+    source: "moves",
   });
   if (poiId !== null) {
     state.rows.stay_pois.push({ stay_id: stay.id, poi_id: poiId, role: "primary", distance_m: null });
-    if (movesPoiId !== null && replacedStay?.poiId !== null && replacedStay?.poiId !== undefined && replacedStay.poiId !== movesPoiId) {
+    if (
+      movesPoiId !== null &&
+      replacedStay?.poiId !== null &&
+      replacedStay?.poiId !== undefined &&
+      replacedStay.poiId !== movesPoiId
+    ) {
       state.rows.stay_pois.push({
         stay_id: stay.id,
         poi_id: replacedStay.poiId,
         role: "secondary",
-        distance_m: replacedStay.distance
+        distance_m: replacedStay.distance,
       });
     }
   } else {
@@ -2574,7 +2820,7 @@ function resolveMovesPoi(
   category: string | null,
   center: { lat: number; lon: number },
   seenTs: number,
-  revision: number
+  revision: number,
 ): number | null {
   const cacheKey = `moves:${placeId}`;
   const existingId = aliases
@@ -2590,25 +2836,22 @@ function resolveMovesPoi(
     const existing = state.rows.pois.find((row) => row.id === existingId);
     if (existing) {
       existing.visitCount += 1;
-      existing.first_seen_ts = existing.first_seen_ts === null
-        ? seenTs
-        : Math.min(existing.first_seen_ts, seenTs);
-      existing.last_seen_ts = existing.last_seen_ts === null
-        ? seenTs
-        : Math.max(existing.last_seen_ts, seenTs);
+      existing.first_seen_ts = existing.first_seen_ts === null ? seenTs : Math.min(existing.first_seen_ts, seenTs);
+      existing.last_seen_ts = existing.last_seen_ts === null ? seenTs : Math.max(existing.last_seen_ts, seenTs);
     }
     for (const alias of aliases) {
       state.poiCache.set(`moves:${alias}`, existingId);
     }
-    state.movesPoiIdentityRanks.set(existingId, Math.max(identityRank, state.movesPoiIdentityRanks.get(existingId) ?? 0));
+    state.movesPoiIdentityRanks.set(
+      existingId,
+      Math.max(identityRank, state.movesPoiIdentityRanks.get(existingId) ?? 0),
+    );
     return existingId;
   }
 
   const existing = existingId ? state.rows.pois.find((row) => row.id === existingId) : null;
-  const existingIdentityRank = existingId ? state.movesPoiIdentityRanks.get(existingId) ?? 0 : 0;
-  const providerId = existing && existingIdentityRank > identityRank
-    ? existing.provider_poi_id ?? placeId
-    : placeId;
+  const existingIdentityRank = existingId ? (state.movesPoiIdentityRanks.get(existingId) ?? 0) : 0;
+  const providerId = existing && existingIdentityRank > identityRank ? (existing.provider_poi_id ?? placeId) : placeId;
   const poiId = insertPoi(state, {
     provider: "moves",
     providerId,
@@ -2619,7 +2862,7 @@ function resolveMovesPoi(
     radius: null,
     seenTs,
     thoroughfare: null,
-    revision
+    revision,
   });
   for (const alias of aliases) {
     state.poiCache.set(`moves:${alias}`, poiId);
@@ -2631,9 +2874,11 @@ function resolveMovesPoi(
     }
     state.movesPoiIdentityRanks.set(poiId, identityRank);
   }
-  const pending = [...new Map(aliases
-    .flatMap((alias) => state.pendingMovesStays.get(alias) ?? [])
-    .map((stay) => [stay.id, stay])).values()];
+  const pending = [
+    ...new Map(
+      aliases.flatMap((alias) => state.pendingMovesStays.get(alias) ?? []).map((stay) => [stay.id, stay]),
+    ).values(),
+  ];
   if (pending.length > 0) {
     const poi = state.rows.pois.find((row) => row.id === poiId);
     if (poi) {
@@ -2669,18 +2914,18 @@ function importMovesMove(segment: JsonObject, state: MutableState): void {
       mode: mapActivityType(stringValue(segment.activity)),
       distance: positiveNumber(numberValue(segment.distance)) ?? calculatePathDistance(coords),
       tzOffset: extractTimezoneOffsetSeconds(stringValue(segment.startTime)),
-      provider: "moves_export",
+      provider: providers.movesExport,
       manual: segment.manual === true,
-      revision: movesRevisionValue(segment, segment)
+      revision: movesRevisionValue(segment, segment),
     });
     if (coords.length >= 2) {
       insertRoutePath(
         state,
         move.id,
         coords,
-        "moves_export",
+        providers.movesExport,
         routePoints.map((point) => point.ts),
-        preparedRoute.pathQuality
+        preparedRoute.pathQuality,
       );
     }
     importMovesPedometer(segment, end, state);
@@ -2697,10 +2942,13 @@ function importMovesMove(segment: JsonObject, state: MutableState): void {
       return {
         activity,
         start: Math.max(activityStart, start),
-        end: Math.min(activityEnd, end)
+        end: Math.min(activityEnd, end),
       };
     })
-    .filter((activity): activity is { activity: JsonObject; start: number; end: number } => activity !== null && activity.end > activity.start)
+    .filter(
+      (activity): activity is { activity: JsonObject; start: number; end: number } =>
+        activity !== null && activity.end > activity.start,
+    )
     .sort((lhs, rhs) => lhs.start - rhs.start);
 
   const segmentRevision = movesRevisionValue(segment, segment);
@@ -2708,9 +2956,13 @@ function importMovesMove(segment: JsonObject, state: MutableState): void {
     const activity = normalizedActivity.activity;
     const combinedTrackPoints = fuseMovesTrackPoints([
       { points: arrayValue(segment.trackPoints), revision: segmentRevision },
-      { points: arrayValue(activity.trackPoints), revision: activityRevisionValue(activity, segmentRevision) }
+      { points: arrayValue(activity.trackPoints), revision: activityRevisionValue(activity, segmentRevision) },
     ]);
-    const preparedRoute = prepareRouteFromTrackPoints(combinedTrackPoints, normalizedActivity.start, normalizedActivity.end);
+    const preparedRoute = prepareRouteFromTrackPoints(
+      combinedTrackPoints,
+      normalizedActivity.start,
+      normalizedActivity.end,
+    );
     const routePoints = preparedRoute.points;
     const effectiveCoords = routePoints.map((point) => point.coord);
     const move = insertMove(state, {
@@ -2719,25 +2971,30 @@ function importMovesMove(segment: JsonObject, state: MutableState): void {
       mode: mapActivityType(stringValue(activity.activity)),
       distance: positiveNumber(numberValue(activity.distance)) ?? calculatePathDistance(effectiveCoords),
       tzOffset: extractTimezoneOffsetSeconds(stringValue(activity.startTime)),
-      provider: "moves_export",
+      provider: providers.movesExport,
       manual: activity.manual === true || segment.manual === true,
-      revision: Math.max(activityRevisionValue(activity, 0), movesRevisionValue(segment, segment))
+      revision: Math.max(activityRevisionValue(activity, 0), movesRevisionValue(segment, segment)),
     });
     if (effectiveCoords.length >= 2) {
       insertRoutePath(
         state,
         move.id,
         effectiveCoords,
-        "moves_export",
+        providers.movesExport,
         routePoints.map((point) => point.ts),
-        preparedRoute.pathQuality
+        preparedRoute.pathQuality,
       );
     }
     importMovesPedometer(activity, normalizedActivity.end, state);
   }
 }
 
-function importMovesPedometer(value: JsonObject, end: number, state: MutableState, sourceDayKey: string | null = null): boolean {
+function importMovesPedometer(
+  value: JsonObject,
+  end: number,
+  state: MutableState,
+  sourceDayKey: string | null = null,
+): boolean {
   const rawSteps = positiveNumber(numberValue(value.steps));
   const steps = rawSteps === null ? null : Math.round(rawSteps);
   if (steps === null) {
@@ -2764,7 +3021,7 @@ function importMovesPedometer(value: JsonObject, end: number, state: MutableStat
     timezoneOffset,
     manual: value.manual === true,
     sequence: null,
-    mode: activity
+    mode: activity,
   });
   return true;
 }
@@ -2800,9 +3057,7 @@ function importMovesSummaryPedometer(day: JsonObject, state: MutableState, sourc
 }
 
 function movesSummaryTimestamp(day: JsonObject): number | null {
-  const segmentEnds = arrayValue(day.segments)
-    .map(segmentEnd)
-    .filter(Number.isFinite);
+  const segmentEnds = arrayValue(day.segments).map(segmentEnd).filter(Number.isFinite);
   const date = stringValue(day.date);
   const dayEnd = movesDateTimestamp(date, 12);
   const timestamp = segmentEnds.length > 0 ? Math.max(...segmentEnds) : dayEnd;
@@ -2822,7 +3077,7 @@ function insertPoi(
     seenTs: number | null;
     thoroughfare: string | null;
     revision?: number;
-  }
+  },
 ): number {
   const cacheKey = input.providerId ? `${input.provider}:${input.providerId}` : null;
   if (cacheKey) {
@@ -2869,7 +3124,7 @@ function insertPoi(
     sub_locality: null,
     administrative_area: null,
     postal_code: null,
-    country: null
+    country: null,
   };
   state.rows.pois.push(row);
   state.poiRevisions.set(row.id, input.revision ?? input.seenTs ?? 0);
@@ -2923,7 +3178,7 @@ function getOrCreateArcPoi(item: JsonObject, state: MutableState, firstSeen: num
     radius: positiveNumber(numberValue(radius?.mean)),
     seenTs: firstSeen,
     thoroughfare: stringValue(place.streetAddress),
-    revision: Math.max(revisionValue(item), revisionValue(place))
+    revision: Math.max(revisionValue(item), revisionValue(place)),
   });
   if (placeId) {
     state.poiCache.set(`arc:${placeId}`, poiId);
@@ -2945,13 +3200,14 @@ function insertMove(
     provider: string;
     manual?: boolean;
     revision?: number;
-  }
+  },
 ): MoveRow {
-  const duplicate = state.rows.moves.find((move) => Math.abs(move.start_ts - input.start) < 0.000001 && Math.abs((move.end_ts ?? 0) - input.end) < 0.000001 && move.mode === input.mode);
+  const duplicate = findDuplicateMove(state, input.start, input.end, input.mode);
   if (duplicate) {
-    const preferMovesProvenance = duplicate.start_ts < movesLastServiceDayEndTs
-      && semanticSource(duplicate.provider) === "arc"
-      && semanticSource(input.provider) === "moves";
+    const preferMovesProvenance =
+      duplicate.start_ts < movesLastServiceDayEndTs &&
+      semanticSource(duplicate.provider) === "arc" &&
+      semanticSource(input.provider) === "moves";
     if (preferMovesProvenance) {
       duplicate.provider = input.provider;
       duplicate.distance_m = input.distance ?? duplicate.distance_m;
@@ -2959,13 +3215,13 @@ function insertMove(
       state.semanticEvidence.set(`move:${duplicate.id}`, {
         manual: input.manual === true,
         revision: input.revision ?? 0,
-        source: "moves"
+        source: "moves",
       });
     } else {
       recordSemanticEvidence(state, "move", duplicate.id, {
         manual: input.manual === true,
         revision: input.revision ?? 0,
-        source: semanticSource(input.provider)
+        source: semanticSource(input.provider),
       });
     }
     return duplicate;
@@ -2978,15 +3234,45 @@ function insertMove(
     mode: input.mode,
     distance_m: input.distance,
     tz_offset_s: input.tzOffset,
-    provider: input.provider
+    provider: input.provider,
   };
   state.rows.moves.push(row);
+  const bucketKey = moveBucketKey(input.start, input.end, input.mode);
+  const bucket = state.moveIndex.get(bucketKey) ?? [];
+  bucket.push(row);
+  state.moveIndex.set(bucketKey, bucket);
   recordSemanticEvidence(state, "move", row.id, {
     manual: input.manual === true,
     revision: input.revision ?? 0,
-    source: semanticSource(input.provider)
+    source: semanticSource(input.provider),
   });
   return row;
+}
+
+function findDuplicateMove(state: MutableState, start: number, end: number, mode: MoveMode): MoveRow | undefined {
+  const startBucket = Math.round(start * 1_000_000);
+  const endBucket = Math.round(end * 1_000_000);
+  for (let startOffset = -1; startOffset <= 1; startOffset += 1) {
+    for (let endOffset = -1; endOffset <= 1; endOffset += 1) {
+      const bucket = state.moveIndex.get(`${startBucket + startOffset}|${endBucket + endOffset}|${mode}`);
+      if (bucket === undefined) {
+        continue;
+      }
+      const duplicate = bucket.find(
+        (move) =>
+          Math.abs(move.start_ts - start) < duplicateTimestampToleranceS &&
+          Math.abs((move.end_ts ?? 0) - end) < duplicateTimestampToleranceS,
+      );
+      if (duplicate !== undefined) {
+        return duplicate;
+      }
+    }
+  }
+  return undefined;
+}
+
+function moveBucketKey(start: number, end: number, mode: MoveMode): string {
+  return `${Math.round(start * 1_000_000)}|${Math.round(end * 1_000_000)}|${mode}`;
 }
 
 function semanticSource(provider: string | null): SemanticEvidence["source"] {
@@ -3003,13 +3289,13 @@ function recordSemanticEvidence(
   state: MutableState,
   kind: SemanticRef["kind"],
   id: number,
-  evidence: SemanticEvidence
+  evidence: SemanticEvidence,
 ): void {
   const key = `${kind}:${id}`;
   const incoming: SemanticEvidence = {
     manual: evidence.manual,
     revision: evidence.revision,
-    source: evidence.source
+    source: evidence.source,
   };
   const existing = state.semanticEvidence.get(key);
   if (!existing) {
@@ -3019,7 +3305,7 @@ function recordSemanticEvidence(
   state.semanticEvidence.set(key, {
     manual: existing.manual || incoming.manual,
     revision: Math.max(existing.revision, incoming.revision),
-    source: incoming.manual && !existing.manual ? incoming.source : existing.source
+    source: incoming.manual && !existing.manual ? incoming.source : existing.source,
   });
 }
 
@@ -3029,7 +3315,7 @@ function insertRoutePath(
   coords: Array<[number, number]>,
   provider: string,
   timestamps: Array<number | null> = coords.map(() => null),
-  pathQuality: PreparedRoute["pathQuality"] = "raw"
+  pathQuality: PreparedRoute["pathQuality"] = "raw",
 ): RoutePathRow | null {
   const bounds = calculateBounds(coords);
   if (!bounds || coords.length < 2) {
@@ -3039,7 +3325,7 @@ function insertRoutePath(
   state.routeEvidence.set(moveId, {
     points: coords.map((coord, index) => ({ coord, ts: timestamps[index] ?? null })),
     provider,
-    pathQuality
+    pathQuality,
   });
 
   const row: RoutePathRow = {
@@ -3048,7 +3334,7 @@ function insertRoutePath(
     is_primary: 1,
     codec: "bqdc-v1",
     compression: "none",
-    quantization_cm: 100,
+    quantization_cm: defaultBqdcQuantizationCm,
     path_blob: encodeBQDCPath(coords),
     sample_count: coords.length,
     path_quality: pathQuality,
@@ -3057,7 +3343,7 @@ function insertRoutePath(
     bbox_min_lon: bounds.minLon,
     bbox_max_lat: bounds.maxLat,
     bbox_max_lon: bounds.maxLon,
-    lod_level: 0
+    lod_level: 0,
   };
   state.rows.route_paths.push(row);
   return row;
@@ -3098,7 +3384,7 @@ function importSamples(samples: JsonObject[], state: MutableState): number {
         course_acc_deg: courseAccuracy,
         tz_offset_s: tzOffset,
         provider: "unknown",
-        is_simulated: 0
+        is_simulated: 0,
       };
       rawGPSRows.push(rawGPS);
 
@@ -3118,7 +3404,7 @@ function importSamples(samples: JsonObject[], state: MutableState): number {
         source_kind: "raw",
         flags: null,
         step_delta: null,
-        tz_offset_s: tzOffset
+        tz_offset_s: tzOffset,
       };
       sampleRows.push(sampleRow);
     }
@@ -3143,7 +3429,7 @@ function makeMotionActivityRow(
   ts: number,
   activity: string,
   confidence: 0 | 1 | 2,
-  tzOffset: number | null
+  tzOffset: number | null,
 ): RawMotionActivityRow {
   const key = activity.trim().toLowerCase();
   return {
@@ -3157,7 +3443,7 @@ function makeMotionActivityRow(
     is_cycling: key === "cycling" || key === "bicycle" ? 1 : 0,
     is_on_foot: key === "walking" || key === "walk" || key === "running" || key === "run" ? 1 : 0,
     is_unknown: key === "unknown" ? 1 : 0,
-    tz_offset_s: tzOffset
+    tz_offset_s: tzOffset,
   };
 }
 
@@ -3165,7 +3451,7 @@ function importPedometerData(
   item: JsonObject,
   state: MutableState,
   tzOffset: number | null,
-  sequence: number
+  sequence: number,
 ): boolean {
   const steps = positiveNumber(numberValue(item.stepCount) ?? numberValue(item.hkStepCount));
   const floorsUp = positiveNumber(numberValue(item.floorsAscended));
@@ -3182,11 +3468,8 @@ function importPedometerData(
 
   const samples = arrayValue(item.samples);
   const activity = stringValue(item.activityType) ?? stringValue(item.confirmedType);
-  const moveMode = item.isVisit === true
-    ? null
-    : activity
-      ? mapActivityType(activity)
-      : dominantArcSampleMoveMode(samples);
+  const moveMode =
+    item.isVisit === true ? null : activity ? mapActivityType(activity) : dominantArcSampleMoveMode(samples);
   const coords = coordinatesFromSamples(samples);
   const roundedSteps = steps === null ? null : Math.round(steps);
   state.pedometerClaims.push({
@@ -3202,7 +3485,7 @@ function importPedometerData(
     timezoneOffset: tzOffset,
     manual: item.manualActivityType === true,
     sequence,
-    mode: activity
+    mode: activity,
   });
   return true;
 }
@@ -3210,7 +3493,7 @@ function importPedometerData(
 function validatedPedometerDistance(
   steps: number | null,
   distance: number | null,
-  activity: string | null
+  activity: string | null,
 ): number | null {
   if (steps === null || steps <= 0 || distance === null || activity === null) {
     return null;
@@ -3225,13 +3508,14 @@ function validatedPedometerDistance(
     : null;
 }
 
-function materializePedometerClaims(state: MutableState): void {
+function materializePedometerClaims(state: MutableState, signal?: AbortSignal): void {
   const grouped = new Map<string, PedometerClaim[]>();
   const canonicalClaims = [
     ...canonicalArcPedometerClaims(state.pedometerClaims.filter((claim) => claim.source === "arc")),
-    ...state.pedometerClaims.filter((claim) => claim.source === "moves")
+    ...state.pedometerClaims.filter((claim) => claim.source === "moves"),
   ];
   for (const claim of alignPedometerClaimDays(canonicalClaims)) {
+    throwIfAborted(signal);
     const key = claim.dayKey ?? `timestamp:${claim.end}`;
     const group = grouped.get(key) ?? [];
     group.push(claim);
@@ -3240,6 +3524,7 @@ function materializePedometerClaims(state: MutableState): void {
 
   const selected: PedometerClaim[] = [];
   for (const [dayKey, claims] of grouped) {
+    throwIfAborted(signal);
     const arc = claims.filter((claim) => claim.source === "arc");
     const moves = claims.filter((claim) => claim.source === "moves");
     if (arc.length === 0 || moves.length === 0) {
@@ -3251,34 +3536,49 @@ function materializePedometerClaims(state: MutableState): void {
     const movesValidated = summaryTotal !== undefined && movesTotal === summaryTotal;
     const components = pedometerClaimComponents(arc, moves);
     for (const component of components) {
+      throwIfAborted(signal);
       const componentArc = component.filter((claim) => claim.source === "arc");
       const componentMoves = component.filter((claim) => claim.source === "moves");
       if (componentArc.length === 0 || componentMoves.length === 0) {
         selected.push(...component);
         continue;
       }
-      const matchingPreShutdownMoves = componentMoves.some((move) => move.end < movesLastServiceDayEndTs
-        && move.steps !== null
-        && componentArc.some((arcClaim) => arcClaim.steps === move.steps));
-      const chooseMoves = matchingPreShutdownMoves
-        || movesValidated
-        || comparePedometerClaimGroups(componentMoves, componentArc) >= 0;
+      const matchingPreShutdownMoves = componentMoves.some(
+        (move) =>
+          move.end < movesLastServiceDayEndTs &&
+          move.steps !== null &&
+          componentArc.some((arcClaim) => arcClaim.steps === move.steps),
+      );
+      const chooseMoves =
+        matchingPreShutdownMoves || movesValidated || comparePedometerClaimGroups(componentMoves, componentArc) >= 0;
       selected.push(...(chooseMoves ? componentMoves : componentArc));
       if (chooseMoves) {
-        selected.push(...componentArc
-          .filter((claim) => claim.floorsUp !== null || claim.floorsDown !== null)
-          .map((claim) => ({ ...claim, steps: null, distance: null })));
+        selected.push(
+          ...componentArc
+            .filter((claim) => claim.floorsUp !== null || claim.floorsDown !== null)
+            .map((claim) => ({ ...claim, steps: null, distance: null })),
+        );
       }
     }
   }
 
   const seen = new Set<string>();
   const rows: RawPedometerRow[] = [];
-  for (const claim of selected.sort((lhs, rhs) => lhs.end - rhs.end || compareStableStrings(canonicalJson(lhs), canonicalJson(rhs)))) {
+  for (const claim of selected.sort(
+    (lhs, rhs) => lhs.end - rhs.end || compareStableStrings(canonicalJson(lhs), canonicalJson(rhs)),
+  )) {
+    throwIfAborted(signal);
     if (claim.steps === null && claim.floorsUp === null && claim.floorsDown === null) {
       continue;
     }
-    const identity = [claim.end, claim.steps, claim.distance, claim.floorsUp, claim.floorsDown, claim.timezoneOffset].join("|");
+    const identity = [
+      claim.end,
+      claim.steps,
+      claim.distance,
+      claim.floorsUp,
+      claim.floorsDown,
+      claim.timezoneOffset,
+    ].join("|");
     if (seen.has(identity)) {
       continue;
     }
@@ -3292,7 +3592,7 @@ function materializePedometerClaims(state: MutableState): void {
       pace_s_per_m: null,
       floors_up: claim.floorsUp,
       floors_down: claim.floorsDown,
-      tz_offset_s: claim.timezoneOffset
+      tz_offset_s: claim.timezoneOffset,
     });
   }
   emitRows(state, "raw_pedometer", rows);
@@ -3337,7 +3637,7 @@ function alignPedometerClaimDays(claims: PedometerClaim[]): PedometerClaim[] {
       ? {
           ...claim,
           dayKey: match.dayKey,
-          timezoneOffset: claim.timezoneOffset ?? match.timezoneOffset
+          timezoneOffset: claim.timezoneOffset ?? match.timezoneOffset,
         }
       : claim;
   });
@@ -3350,8 +3650,10 @@ function pedometerWindowsMatch(lhs: PedometerClaim, rhs: PedometerClaim): boolea
   const lhsDuration = Math.max(1, lhs.end - lhs.start);
   const rhsDuration = Math.max(1, rhs.end - rhs.start);
   const overlap = pedometerWindowOverlap(lhs, rhs);
-  return overlap / Math.min(lhsDuration, rhsDuration) >= 0.5
-    || Math.abs(lhs.start - rhs.start) <= 90 && Math.abs(lhs.end - rhs.end) <= 90;
+  return (
+    overlap / Math.min(lhsDuration, rhsDuration) >= 0.5 ||
+    (Math.abs(lhs.start - rhs.start) <= 90 && Math.abs(lhs.end - rhs.end) <= 90)
+  );
 }
 
 function pedometerWindowOverlap(lhs: PedometerClaim, rhs: PedometerClaim): number {
@@ -3378,20 +3680,25 @@ function canonicalArcPedometerClaims(claims: PedometerClaim[]): PedometerClaim[]
     if (cluster.length === 0) {
       return;
     }
-    const shouldDeduplicate = cluster.length > 1 && (
-      new Set(cluster.map((claim) => claim.kind)).size > 1
-      || cluster.some((claim) => !hasPositivePedometerDuration(claim))
-      || clusterHasOverlappingWindows(cluster)
-      || new Set(cluster.filter((claim) => claim.kind === "move").map((claim) => claim.mode)).size > 1
-    );
+    const shouldDeduplicate =
+      cluster.length > 1 &&
+      (new Set(cluster.map((claim) => claim.kind)).size > 1 ||
+        cluster.some((claim) => !hasPositivePedometerDuration(claim)) ||
+        clusterHasOverlappingWindows(cluster) ||
+        new Set(cluster.filter((claim) => claim.kind === "move").map((claim) => claim.mode)).size > 1);
     if (!shouldDeduplicate) {
       selected.push(...cluster);
       cluster = [];
       clusterEnd = Number.NEGATIVE_INFINITY;
       return;
     }
-    const winner = [...cluster].sort((lhs, rhs) => arcPedometerClaimRank(lhs) - arcPedometerClaimRank(rhs)
-      || compareStableStrings(canonicalJson(lhs), canonicalJson(rhs))).at(-1)!;
+    const winner = [...cluster]
+      .sort(
+        (lhs, rhs) =>
+          arcPedometerClaimRank(lhs) - arcPedometerClaimRank(rhs) ||
+          compareStableStrings(canonicalJson(lhs), canonicalJson(rhs)),
+      )
+      .at(-1)!;
     const floorsUp = cluster.map((claim) => claim.floorsUp).find((value) => value !== null) ?? null;
     const floorsDown = cluster.map((claim) => claim.floorsDown).find((value) => value !== null) ?? null;
     selected.push({ ...winner, floorsUp, floorsDown });
@@ -3402,18 +3709,21 @@ function canonicalArcPedometerClaims(claims: PedometerClaim[]): PedometerClaim[]
   for (const claim of sorted) {
     const previous = cluster.at(-1);
     const start = claim.start ?? claim.end;
-    const sameSignature = previous !== undefined
-      && cluster.every((candidate) => claim.steps === candidate.steps
-        && compatibleOptionalMetric(claim.floorsUp, candidate.floorsUp)
-        && compatibleOptionalMetric(claim.floorsDown, candidate.floorsDown));
-    const adjacentInTimeline = previous !== undefined
-      && previous.sequence !== null
-      && claim.sequence !== null
-      && claim.sequence === previous.sequence + 1;
+    const sameSignature =
+      previous !== undefined &&
+      cluster.every(
+        (candidate) =>
+          claim.steps === candidate.steps &&
+          compatibleOptionalMetric(claim.floorsUp, candidate.floorsUp) &&
+          compatibleOptionalMetric(claim.floorsDown, candidate.floorsDown),
+      );
+    const adjacentInTimeline =
+      previous !== undefined &&
+      previous.sequence !== null &&
+      claim.sequence !== null &&
+      claim.sequence === previous.sequence + 1;
     const overlapsCluster = start <= clusterEnd;
-    if (!sameSignature
-      || start > clusterEnd + 90
-      || !adjacentInTimeline && !overlapsCluster) {
+    if (!sameSignature || start > clusterEnd + 90 || (!adjacentInTimeline && !overlapsCluster)) {
       flush();
     }
     cluster.push(claim);
@@ -3453,7 +3763,7 @@ function comparePedometerClaimGroups(lhs: PedometerClaim[], rhs: PedometerClaim[
     claims.filter((claim) => claim.manual).length,
     claims.reduce((sum, claim) => sum + Math.max(0, claim.end - (claim.start ?? claim.end)), 0),
     claims.filter((claim) => claim.steps !== null).length,
-    claims.filter((claim) => claim.distance !== null).length
+    claims.filter((claim) => claim.distance !== null).length,
   ];
   return compareNumericTuples(score(lhs), score(rhs));
 }
@@ -3482,23 +3792,26 @@ function emitRows<T extends StreamableAuraTable>(state: MutableState, table: T, 
     state.onRows(table, rows);
     state.streamedCounts[table] += rows.length;
   } else if (table === "raw_gps") {
-    state.rows.raw_gps.push(...rows as RawGPSRow[]);
+    state.rows.raw_gps.push(...(rows as RawGPSRow[]));
   } else if (table === "samples") {
-    state.rows.samples.push(...rows as SampleRow[]);
+    state.rows.samples.push(...(rows as SampleRow[]));
   } else if (table === "raw_motion_activity") {
-    state.rows.raw_motion_activity.push(...rows as RawMotionActivityRow[]);
+    state.rows.raw_motion_activity.push(...(rows as RawMotionActivityRow[]));
   } else {
-    state.rows.raw_pedometer.push(...rows as RawPedometerRow[]);
+    state.rows.raw_pedometer.push(...(rows as RawPedometerRow[]));
   }
 }
 
 function assertNonEmptyConversion(state: MutableState): void {
-  const rowCount = Object.values(state.rows).reduce((sum, rows) => sum + rows.length, 0)
-    + Object.values(state.streamedCounts).reduce((sum, count) => sum + count, 0);
+  const rowCount =
+    Object.values(state.rows).reduce((sum, rows) => sum + rows.length, 0) +
+    Object.values(state.streamedCounts).reduce((sum, count) => sum + count, 0);
   if (rowCount === 0) {
-    throw new Error(state.diagnostics.length > 0
-      ? `No convertible history records remained: ${state.diagnostics[0]}`
-      : "No convertible history records remained after validation");
+    throw new Error(
+      state.diagnostics.length > 0
+        ? `No convertible history records remained: ${state.diagnostics[0]}`
+        : "No convertible history records remained after validation",
+    );
   }
 }
 
@@ -3520,7 +3833,10 @@ function prepareRouteFromSamples(samples: JsonObject[]): PreparedRoute {
 function samplesWithinWindow(samples: JsonObject[], start: number, end: number): JsonObject[] {
   return samples
     .map((sample) => ({ sample, ts: sampleTimestamp(sample) }))
-    .filter((candidate): candidate is { sample: JsonObject; ts: number } => candidate.ts !== null && candidate.ts >= start && candidate.ts <= end)
+    .filter(
+      (candidate): candidate is { sample: JsonObject; ts: number } =>
+        candidate.ts !== null && candidate.ts >= start && candidate.ts <= end,
+    )
     .sort((lhs, rhs) => lhs.ts - rhs.ts)
     .map((candidate) => candidate.sample);
 }
@@ -3528,7 +3844,7 @@ function samplesWithinWindow(samples: JsonObject[], start: number, end: number):
 function coordinatesFromTrackPoints(
   points: JsonObject[],
   start = Number.NEGATIVE_INFINITY,
-  end = Number.POSITIVE_INFINITY
+  end = Number.POSITIVE_INFINITY,
 ): Array<[number, number]> {
   return prepareRouteFromTrackPoints(points, start, end).points.map((point) => point.coord);
 }
@@ -3536,18 +3852,14 @@ function coordinatesFromTrackPoints(
 function prepareRouteFromTrackPoints(
   points: JsonObject[],
   start = Number.NEGATIVE_INFINITY,
-  end = Number.POSITIVE_INFINITY
+  end = Number.POSITIVE_INFINITY,
 ): PreparedRoute {
   const candidates: TimedRoutePoint[] = [];
   for (const point of points) {
     const lat = numberValue(point.lat);
     const lon = numberValue(point.lon);
     const ts = parseImportTimestamp(stringValue(point.time));
-    if (
-      lat !== null
-      && lon !== null
-      && validLatLon(lat, lon)
-    ) {
+    if (lat !== null && lon !== null && validLatLon(lat, lon)) {
       candidates.push({ coord: [lon, lat], ts });
     }
   }
@@ -3555,12 +3867,15 @@ function prepareRouteFromTrackPoints(
     return { points: candidates, pathQuality: "raw" };
   }
   const withinWindow = candidates
-    .filter((candidate): candidate is TimedRoutePoint & { ts: number } => candidate.ts !== null && candidate.ts >= start && candidate.ts <= end)
+    .filter(
+      (candidate): candidate is TimedRoutePoint & { ts: number } =>
+        candidate.ts !== null && candidate.ts >= start && candidate.ts <= end,
+    )
     .sort((lhs, rhs) => lhs.ts - rhs.ts);
   const prepared = prepareTimedRoute(withinWindow);
   return {
     points: prepared.points,
-    pathQuality: prepared.pathQuality === "filtered" || withinWindow.length !== candidates.length ? "filtered" : "raw"
+    pathQuality: prepared.pathQuality === "filtered" || withinWindow.length !== candidates.length ? "filtered" : "raw",
   };
 }
 
@@ -3568,7 +3883,7 @@ function prepareTimedRoute(points: TimedRoutePoint[]): PreparedRoute {
   if (points.length < 2 || points.every((point) => point.ts === null)) {
     return { points, pathQuality: "raw" };
   }
-  let candidates = points
+  const candidates = points
     .filter((point): point is TimedRoutePoint & { ts: number } => point.ts !== null)
     .sort((lhs, rhs) => lhs.ts - rhs.ts);
   let removedSpike = false;
@@ -3580,9 +3895,9 @@ function prepareTimedRoute(points: TimedRoutePoint[]): PreparedRoute {
       const current = candidates[index]!;
       const next = candidates[index + 1]!;
       if (
-        !routeEdgeIsPlausible(previous, current)
-        && !routeEdgeIsPlausible(current, next)
-        && routeEdgeIsPlausible(previous, next)
+        !routeEdgeIsPlausible(previous, current) &&
+        !routeEdgeIsPlausible(current, next) &&
+        routeEdgeIsPlausible(previous, next)
       ) {
         candidates.splice(index, 1);
         removedSpike = true;
@@ -3604,40 +3919,44 @@ function prepareTimedRoute(points: TimedRoutePoint[]): PreparedRoute {
   if (component.length > 0) {
     components.push(component);
   }
-  const selected = components.sort((lhs, rhs) => {
-    const pointDifference = rhs.length - lhs.length;
-    if (pointDifference !== 0) {
-      return pointDifference;
-    }
-    const lhsDuration = lhs.length > 1 ? lhs.at(-1)!.ts - lhs[0]!.ts : 0;
-    const rhsDuration = rhs.length > 1 ? rhs.at(-1)!.ts - rhs[0]!.ts : 0;
-    return rhsDuration - lhsDuration || lhs[0]!.ts - rhs[0]!.ts;
-  })[0] ?? [];
+  const selected =
+    components.sort((lhs, rhs) => {
+      const pointDifference = rhs.length - lhs.length;
+      if (pointDifference !== 0) {
+        return pointDifference;
+      }
+      const lhsDuration = lhs.length > 1 ? lhs.at(-1)!.ts - lhs[0]!.ts : 0;
+      const rhsDuration = rhs.length > 1 ? rhs.at(-1)!.ts - rhs[0]!.ts : 0;
+      return rhsDuration - lhsDuration || lhs[0]!.ts - rhs[0]!.ts;
+    })[0] ?? [];
   return {
     points: selected,
-    pathQuality: removedSpike || selected.length !== points.length ? "filtered" : "raw"
+    pathQuality: removedSpike || selected.length !== points.length ? "filtered" : "raw",
   };
 }
 
-function routeEdgeIsPlausible(
-  lhs: TimedRoutePoint & { ts: number },
-  rhs: TimedRoutePoint & { ts: number }
-): boolean {
+function routeEdgeIsPlausible(lhs: TimedRoutePoint & { ts: number }, rhs: TimedRoutePoint & { ts: number }): boolean {
   const duration = rhs.ts - lhs.ts;
   const distance = haversineDistance(lhs.coord[1], lhs.coord[0], rhs.coord[1], rhs.coord[0]);
   return duration > 0
     ? distance / duration <= maximumSemanticRouteSpeedMps
-    : duration === 0 && distance < 0.01;
+    : duration === 0 && distance < routePointDuplicateTimestampDistanceM;
 }
 
-function normalizeTimeline(state: MutableState, onProgress?: (progress: ImportProgress) => void): void {
+function normalizeTimeline(
+  state: MutableState,
+  onProgress?: (progress: ImportProgress) => void,
+  signal?: AbortSignal,
+): void {
+  throwIfAborted(signal);
   const refs = semanticRefs(state);
   const context = makeNormalizationContext();
-  reportProgress(onProgress, "normalize", "Sorting timeline events", refs.length, refs.length);
+  reportProgress(onProgress, "normalize", "Sorting timeline events", refs.length, refs.length, signal);
 
   const normalized: SemanticRef[] = [];
-  reportProgress(onProgress, "normalize", "Resolving timeline overlaps", 0, refs.length);
+  reportProgress(onProgress, "normalize", "Resolving timeline overlaps", 0, refs.length, signal);
   for (let index = 0; index < refs.length; index += 1) {
+    throwIfAborted(signal);
     const ref = refs[index]!;
     if (!hasPositiveDuration(ref)) {
       removeSemanticRow(context, ref);
@@ -3646,25 +3965,26 @@ function normalizeTimeline(state: MutableState, onProgress?: (progress: ImportPr
     normalizeOneRef(state, context, normalized, ref, (suffix) => {
       insertPendingSemanticRef(refs, index + 1, suffix);
     });
-    if ((index + 1) % 500 === 0 || index + 1 === refs.length) {
-      reportProgress(onProgress, "normalize", "Resolving timeline overlaps", index + 1, refs.length);
+    if ((index + 1) % progressReportInterval === 0 || index + 1 === refs.length) {
+      reportProgress(onProgress, "normalize", "Resolving timeline overlaps", index + 1, refs.length, signal);
     }
   }
 
-  reportProgress(onProgress, "normalize", "Merging adjacent timeline events", 0, normalized.length);
-  mergeAdjacentTimelineEvents(state, context, normalized, onProgress);
+  reportProgress(onProgress, "normalize", "Merging adjacent timeline events", 0, normalized.length, signal);
+  mergeAdjacentTimelineEvents(state, context, normalized, onProgress, signal);
   applyNormalizationContext(state, context);
 
+  throwIfAborted(signal);
   const beforeCleanup = state.rows.stays.length + state.rows.moves.length + state.rows.no_data_gaps.length;
-  reportProgress(onProgress, "normalize", "Removing invalid timeline fragments", 0, beforeCleanup);
+  reportProgress(onProgress, "normalize", "Removing invalid timeline fragments", 0, beforeCleanup, signal);
   removeInvalidRows(state);
-  reportProgress(onProgress, "normalize", "Removing invalid timeline fragments", beforeCleanup, beforeCleanup);
+  reportProgress(onProgress, "normalize", "Removing invalid timeline fragments", beforeCleanup, beforeCleanup, signal);
 
   separateAdjacentDistinctStays(state);
   const afterCleanup = state.rows.stays.length + state.rows.moves.length + state.rows.no_data_gaps.length;
-  reportProgress(onProgress, "normalize", "Inserting timeline gaps", 0, afterCleanup);
+  reportProgress(onProgress, "normalize", "Inserting timeline gaps", 0, afterCleanup, signal);
   insertGapsBetweenStays(state);
-  reportProgress(onProgress, "normalize", "Inserting timeline gaps", afterCleanup, afterCleanup);
+  reportProgress(onProgress, "normalize", "Inserting timeline gaps", afterCleanup, afterCleanup, signal);
 }
 
 function makeNormalizationContext(): NormalizationContext {
@@ -3673,7 +3993,7 @@ function makeNormalizationContext(): NormalizationContext {
     removedMoveIds: new Set(),
     removedGapIds: new Set(),
     invalidatedMoveIds: new Set(),
-    stayRedirects: new Map()
+    stayRedirects: new Map(),
   };
 }
 
@@ -3682,9 +4002,9 @@ function normalizeOneRef(
   context: NormalizationContext,
   normalized: SemanticRef[],
   ref: SemanticRef,
-  enqueueSuffix: (suffix: SemanticRef) => void
+  enqueueSuffix: (suffix: SemanticRef) => void,
 ): void {
-  let current: SemanticRef | null = ref;
+  const current: SemanticRef | null = ref;
   while (current) {
     const previous = normalized.at(-1);
     if (!previous) {
@@ -3693,8 +4013,8 @@ function normalizeOneRef(
     }
 
     if (
-      canMergeSemanticRows(previous, current)
-      && (previous.kind === "gap" || touchesOrOverlaps(previous, current) || canMergeAcrossShortStayGap(previous, current))
+      canMergeSemanticRows(previous, current) &&
+      (previous.kind === "gap" || touchesOrOverlaps(previous, current) || canMergeAcrossShortStayGap(previous, current))
     ) {
       mergeSemanticRows(state, context, previous, current);
       return;
@@ -3791,19 +4111,21 @@ function normalizeOneRef(
 }
 
 function isCrossSourceMovePair(lhs: SemanticRef, rhs: SemanticRef): boolean {
-  return lhs.kind === "move"
-    && rhs.kind === "move"
-    && lhs.source !== rhs.source
-    && (lhs.source === "arc" || lhs.source === "moves")
-    && (rhs.source === "arc" || rhs.source === "moves");
+  return (
+    lhs.kind === "move" &&
+    rhs.kind === "move" &&
+    lhs.source !== rhs.source &&
+    (lhs.source === "arc" || lhs.source === "moves") &&
+    (rhs.source === "arc" || rhs.source === "moves")
+  );
 }
 
 function preserveExactMoveGeometry(state: MutableState, target: SemanticRef, source: SemanticRef): void {
   if (
-    target.kind !== "move"
-    || source.kind !== "move"
-    || target.row.start_ts !== source.row.start_ts
-    || target.row.end_ts !== source.row.end_ts
+    target.kind !== "move" ||
+    source.kind !== "move" ||
+    target.row.start_ts !== source.row.start_ts ||
+    target.row.end_ts !== source.row.end_ts
   ) {
     return;
   }
@@ -3823,7 +4145,7 @@ function preserveExactMoveGeometry(state: MutableState, target: SemanticRef, sou
   }
   target.quality = moveSemanticQuality(
     targetMove,
-    targetHasRoute || state.rows.route_paths.some((route) => route.move_id === targetMove.id)
+    targetHasRoute || state.rows.route_paths.some((route) => route.move_id === targetMove.id),
   );
 }
 
@@ -3831,26 +4153,32 @@ function mergeAdjacentTimelineEvents(
   state: MutableState,
   context: NormalizationContext,
   refs: SemanticRef[],
-  onProgress?: (progress: ImportProgress) => void
+  onProgress?: (progress: ImportProgress) => void,
+  signal?: AbortSignal,
 ): void {
   const merged: SemanticRef[] = [];
   for (const [index, ref] of refs.entries()) {
+    throwIfAborted(signal);
     if (isRemoved(context, ref) || !hasPositiveDuration(ref)) {
       removeSemanticRow(context, ref);
       continue;
     }
     const previous = merged.at(-1);
-    if (previous && canMergeSemanticRows(previous, ref) && (ref.row.start_ts === semanticEnd(previous) || canMergeAcrossShortStayGap(previous, ref))) {
+    if (
+      previous &&
+      canMergeSemanticRows(previous, ref) &&
+      (ref.row.start_ts === semanticEnd(previous) || canMergeAcrossShortStayGap(previous, ref))
+    ) {
       mergeSemanticRows(state, context, previous, ref);
     } else {
       merged.push(ref);
     }
-    if ((index + 1) % 500 === 0 || index + 1 === refs.length) {
-      reportProgress(onProgress, "normalize", "Merging adjacent timeline events", index + 1, refs.length);
+    if ((index + 1) % progressReportInterval === 0 || index + 1 === refs.length) {
+      reportProgress(onProgress, "normalize", "Merging adjacent timeline events", index + 1, refs.length, signal);
     }
   }
   if (refs.length === 0) {
-    reportProgress(onProgress, "normalize", "Merging adjacent timeline events", 0, 0);
+    reportProgress(onProgress, "normalize", "Merging adjacent timeline events", 0, 0, signal);
   }
 }
 
@@ -3874,12 +4202,12 @@ function makeSemanticRef(
   state: MutableState,
   kind: SemanticRef["kind"],
   row: StayRow | MoveRow | NoDataGapRow,
-  quality: number
+  quality: number,
 ): SemanticRef {
   const evidence = state.semanticEvidence.get(`${kind}:${row.id}`) ?? {
     manual: false,
     revision: 0,
-    source: "unknown" as const
+    source: "unknown" as const,
   };
   return { kind, row, quality, ...evidence };
 }
@@ -3944,9 +4272,9 @@ function compareSemanticPreference(lhs: SemanticRef, rhs: SemanticRef): number {
 
 function compareHistoricalMovesPreference(lhs: SemanticRef, rhs: SemanticRef): number {
   if (
-    lhs.source === rhs.source
-    || lhs.source !== "moves" && rhs.source !== "moves"
-    || lhs.source !== "arc" && rhs.source !== "arc"
+    lhs.source === rhs.source ||
+    (lhs.source !== "moves" && rhs.source !== "moves") ||
+    (lhs.source !== "arc" && rhs.source !== "arc")
   ) {
     return 0;
   }
@@ -3970,14 +4298,14 @@ function moveSemanticQuality(move: MoveRow, hasRoute: boolean): number {
 }
 
 function gapSemanticQuality(gap: NoDataGapRow): number {
-  return gap.notes === "moves_tracking_off" ? 2 : 0;
+  return gap.notes === timelineNote.movesTrackingOff ? 2 : 0;
 }
 
 function cloneSemanticSuffix(
   state: MutableState,
   context: NormalizationContext,
   ref: SemanticRef,
-  start: number
+  start: number,
 ): SemanticRef | null {
   if (start >= semanticEnd(ref)) {
     return null;
@@ -4022,8 +4350,14 @@ function invalidateMoveGeometry(context: NormalizationContext, ref: SemanticRef)
   }
 }
 
-function mergeSemanticRows(state: MutableState, context: NormalizationContext, target: SemanticRef, source: SemanticRef): void {
-  target.row.end_ts = target.row.end_ts === null || source.row.end_ts === null ? null : Math.max(target.row.end_ts, source.row.end_ts);
+function mergeSemanticRows(
+  state: MutableState,
+  context: NormalizationContext,
+  target: SemanticRef,
+  source: SemanticRef,
+): void {
+  target.row.end_ts =
+    target.row.end_ts === null || source.row.end_ts === null ? null : Math.max(target.row.end_ts, source.row.end_ts);
   if (target.kind === "stay" && source.kind === "stay") {
     const targetStay = target.row as StayRow;
     const sourceStay = source.row as StayRow;
@@ -4059,12 +4393,12 @@ function canMergeAcrossShortStayGap(lhs: SemanticRef, rhs: SemanticRef): boolean
     return false;
   }
   const gap = rhs.row.start_ts - lhs.row.end_ts;
-  return gap > 0 && gap < 60 && staysSpatiallyCompatible(lhs.row as StayRow, rhs.row as StayRow);
+  return gap > 0 && gap < stayUncertaintyGapS && staysSpatiallyCompatible(lhs.row as StayRow, rhs.row as StayRow);
 }
 
 function staysSpatiallyCompatible(lhs: StayRow, rhs: StayRow): boolean {
   const distance = haversineDistance(lhs.centroid_lat, lhs.centroid_lon, rhs.centroid_lat, rhs.centroid_lon);
-  return distance <= Math.max(50, lhs.radius_m + rhs.radius_m);
+  return distance <= Math.max(stayMatchingBufferM, lhs.radius_m + rhs.radius_m);
 }
 
 function touchesOrOverlaps(lhs: SemanticRef, rhs: SemanticRef): boolean {
@@ -4100,9 +4434,15 @@ function isRemoved(context: NormalizationContext, ref: SemanticRef): boolean {
 }
 
 function applyNormalizationContext(state: MutableState, context: NormalizationContext): void {
-  state.rows.stays = state.rows.stays.filter((row) => !context.removedStayIds.has(row.id) && (row.end_ts === null || row.end_ts > row.start_ts));
-  state.rows.moves = state.rows.moves.filter((row) => !context.removedMoveIds.has(row.id) && (row.end_ts === null || row.end_ts > row.start_ts));
-  state.rows.no_data_gaps = state.rows.no_data_gaps.filter((row) => !context.removedGapIds.has(row.id) && (row.end_ts === null || row.end_ts > row.start_ts));
+  state.rows.stays = state.rows.stays.filter(
+    (row) => !context.removedStayIds.has(row.id) && (row.end_ts === null || row.end_ts > row.start_ts),
+  );
+  state.rows.moves = state.rows.moves.filter(
+    (row) => !context.removedMoveIds.has(row.id) && (row.end_ts === null || row.end_ts > row.start_ts),
+  );
+  state.rows.no_data_gaps = state.rows.no_data_gaps.filter(
+    (row) => !context.removedGapIds.has(row.id) && (row.end_ts === null || row.end_ts > row.start_ts),
+  );
 
   const validStayIds = new Set(state.rows.stays.map((row) => row.id));
   const validMoveIds = new Set(state.rows.moves.map((row) => row.id));
@@ -4116,17 +4456,17 @@ function applyNormalizationContext(state: MutableState, context: NormalizationCo
     }
     row.stay_id = stayId;
     const stay = staysById.get(stayId)!;
-    const role: StayPoiRow["role"] = stay.poi_id === row.poi_id
-      ? "primary"
-      : row.role === "primary"
-        ? "secondary"
-        : row.role;
+    const role: StayPoiRow["role"] =
+      stay.poi_id === row.poi_id ? "primary" : row.role === "primary" ? "secondary" : row.role;
     const candidate = { ...row, role };
     const key = `${stayId}:${row.poi_id}`;
     const existing = stayPoisByIdentity.get(key);
     if (!existing || stayPoiRoleRank(candidate.role) > stayPoiRoleRank(existing.role)) {
       stayPoisByIdentity.set(key, candidate);
-    } else if (candidate.distance_m !== null && (existing.distance_m === null || candidate.distance_m < existing.distance_m)) {
+    } else if (
+      candidate.distance_m !== null &&
+      (existing.distance_m === null || candidate.distance_m < existing.distance_m)
+    ) {
       existing.distance_m = candidate.distance_m;
     }
   }
@@ -4154,9 +4494,10 @@ function applyNormalizationContext(state: MutableState, context: NormalizationCo
     if (!move || move.end_ts === null || !evidence) {
       continue;
     }
-    const points = evidence.points.filter((point): point is TimedRoutePoint & { ts: number } => (
-      point.ts !== null && point.ts >= move.start_ts && point.ts <= move.end_ts!
-    ));
+    const points = evidence.points.filter(
+      (point): point is TimedRoutePoint & { ts: number } =>
+        point.ts !== null && point.ts >= move.start_ts && point.ts <= move.end_ts!,
+    );
     if (points.length < 2) {
       continue;
     }
@@ -4168,7 +4509,7 @@ function applyNormalizationContext(state: MutableState, context: NormalizationCo
       coords,
       evidence.provider,
       points.map((point) => point.ts),
-      evidence.pathQuality
+      evidence.pathQuality,
     );
   }
 }
@@ -4192,10 +4533,22 @@ function redirectedId(redirects: Map<number, number>, id: number): number {
 }
 
 function removeInvalidRows(state: MutableState): void {
-  const validStayIds = new Set(state.rows.stays.filter((row) => row.end_ts === null || row.end_ts > row.start_ts).map((row) => row.id));
-  const validMoveIds = new Set(state.rows.moves.filter((row) => row.end_ts === null || row.end_ts > row.start_ts).map((row) => row.id));
-  const validGapIds = new Set(state.rows.no_data_gaps.filter((row) => row.end_ts === null || row.end_ts > row.start_ts).map((row) => row.id));
-  const removed = state.rows.stays.length - validStayIds.size + state.rows.moves.length - validMoveIds.size + state.rows.no_data_gaps.length - validGapIds.size;
+  const validStayIds = new Set(
+    state.rows.stays.filter((row) => row.end_ts === null || row.end_ts > row.start_ts).map((row) => row.id),
+  );
+  const validMoveIds = new Set(
+    state.rows.moves.filter((row) => row.end_ts === null || row.end_ts > row.start_ts).map((row) => row.id),
+  );
+  const validGapIds = new Set(
+    state.rows.no_data_gaps.filter((row) => row.end_ts === null || row.end_ts > row.start_ts).map((row) => row.id),
+  );
+  const removed =
+    state.rows.stays.length -
+    validStayIds.size +
+    state.rows.moves.length -
+    validMoveIds.size +
+    state.rows.no_data_gaps.length -
+    validGapIds.size;
   state.rows.stays = state.rows.stays.filter((row) => validStayIds.has(row.id));
   state.rows.moves = state.rows.moves.filter((row) => validMoveIds.has(row.id));
   state.rows.no_data_gaps = state.rows.no_data_gaps.filter((row) => validGapIds.has(row.id));
@@ -4220,14 +4573,14 @@ function separateAdjacentDistinctStays(state: MutableState): void {
       continue;
     }
     const gap = current.start_ts - previous.end_ts;
-    if (gap < 0 || gap >= 60) {
+    if (gap < 0 || gap >= stayUncertaintyGapS) {
       continue;
     }
-    let needed = 60 - gap;
+    let needed = stayUncertaintyGapS - gap;
     const previousDuration = previous.end_ts - previous.start_ts;
     const currentDuration = (current.end_ts ?? current.start_ts) - current.start_ts;
-    let previousCapacity = Math.max(0, previousDuration - Math.min(60, previousDuration));
-    let currentCapacity = Math.max(0, currentDuration - Math.min(60, currentDuration));
+    let previousCapacity = Math.max(0, previousDuration - Math.min(stayUncertaintyGapS, previousDuration));
+    let currentCapacity = Math.max(0, currentDuration - Math.min(stayUncertaintyGapS, currentDuration));
     if (previousCapacity + currentCapacity < needed) {
       if (gap > 0) {
         continue;
@@ -4257,7 +4610,12 @@ function insertGapsBetweenStays(state: MutableState): void {
   for (let index = 1; index < refs.length; index += 1) {
     const previous = refs[index - 1]!;
     const current = refs[index]!;
-    if (previous.kind !== "stay" || current.kind !== "stay" || previous.row.end_ts === null || current.row.start_ts < previous.row.end_ts) {
+    if (
+      previous.kind !== "stay" ||
+      current.kind !== "stay" ||
+      previous.row.end_ts === null ||
+      current.row.start_ts < previous.row.end_ts
+    ) {
       continue;
     }
     if (current.row.start_ts === previous.row.end_ts) {
@@ -4281,7 +4639,7 @@ function insertGapsBetweenStays(state: MutableState): void {
       end_ts: current.row.start_ts,
       reason: "Unknown",
       uncertainty: null,
-      notes: "generated_between_stays"
+      notes: timelineNote.generatedBetweenStays,
     };
     state.rows.no_data_gaps.push(row);
   }
@@ -4292,15 +4650,19 @@ function makeReport(
   fileCount: number,
   sourceTypes: SourceType[],
   timelineIntegrity: TimelineIntegritySummary,
-  onProgress?: (progress: ImportProgress) => void
+  onProgress?: (progress: ImportProgress) => void,
+  signal?: AbortSignal,
 ): ImportReport {
   const counts = Object.fromEntries(
-    Object.entries(state.rows).map(([key, rows]) => [key, rows.length + (key in state.streamedCounts ? state.streamedCounts[key as StreamableAuraTable] : 0)])
+    Object.entries(state.rows).map(([key, rows]) => [
+      key,
+      rows.length + (key in state.streamedCounts ? state.streamedCounts[key as StreamableAuraTable] : 0),
+    ]),
   ) as Record<keyof AuraRows, number>;
   const semanticCount = state.rows.stays.length + state.rows.moves.length + state.rows.no_data_gaps.length;
-  reportProgress(onProgress, "report", "Summarizing timeline report", 0, semanticCount);
-  const dateRange = summarizeDateRange(state, onProgress, semanticCount);
-  reportProgress(onProgress, "report", "Import report ready", semanticCount, semanticCount);
+  reportProgress(onProgress, "report", "Summarizing timeline report", 0, semanticCount, signal);
+  const dateRange = summarizeDateRange(state, onProgress, semanticCount, signal);
+  reportProgress(onProgress, "report", "Import report ready", semanticCount, semanticCount, signal);
 
   return {
     sourceTypes,
@@ -4309,15 +4671,17 @@ function makeReport(
     dateRange,
     counts,
     diagnostics: reportDiagnostics(state),
-    timelineIntegrity
+    timelineIntegrity,
   };
 }
 
 function summarizeDateRange(
   state: MutableState,
   onProgress?: (progress: ImportProgress) => void,
-  total = 0
+  total = 0,
+  signal?: AbortSignal,
 ): ImportReport["dateRange"] {
+  throwIfAborted(signal);
   let startTs = Number.POSITIVE_INFINITY;
   let endTs = Number.NEGATIVE_INFINITY;
   let completed = 0;
@@ -4337,24 +4701,24 @@ function summarizeDateRange(
     include(row.start_ts);
     include(row.end_ts);
     completed += 1;
-    if (completed % 500 === 0 || completed === total) {
-      reportProgress(onProgress, "report", "Summarizing timeline report", completed, total);
+    if (completed % progressReportInterval === 0 || completed === total) {
+      reportProgress(onProgress, "report", "Summarizing timeline report", completed, total, signal);
     }
   }
   for (const row of state.rows.moves) {
     include(row.start_ts);
     include(row.end_ts);
     completed += 1;
-    if (completed % 500 === 0 || completed === total) {
-      reportProgress(onProgress, "report", "Summarizing timeline report", completed, total);
+    if (completed % progressReportInterval === 0 || completed === total) {
+      reportProgress(onProgress, "report", "Summarizing timeline report", completed, total, signal);
     }
   }
   for (const row of state.rows.no_data_gaps) {
     include(row.start_ts);
     include(row.end_ts);
     completed += 1;
-    if (completed % 500 === 0 || completed === total) {
-      reportProgress(onProgress, "report", "Summarizing timeline report", completed, total);
+    if (completed % progressReportInterval === 0 || completed === total) {
+      reportProgress(onProgress, "report", "Summarizing timeline report", completed, total, signal);
     }
   }
 
@@ -4366,13 +4730,15 @@ function reportProgress(
   phase: ImportProgress["phase"],
   message: string,
   completed: number,
-  total: number
+  total: number,
+  signal?: AbortSignal,
 ): void {
+  throwIfAborted(signal);
   onProgress?.({
     phase,
     message,
     completed,
-    total: Math.max(total, completed, 1)
+    total: Math.max(total, completed, 1),
   });
 }
 
@@ -4385,13 +4751,19 @@ function recordDiagnostic(state: MutableState, message: string): void {
 }
 
 function reportDiagnostics(state: MutableState): string[] {
-  const summaries: string[] = [];
-  for (const [message, count] of state.diagnosticCounts) {
-    if (count > 1) {
-      summaries.push(`${message} (${count.toLocaleString()} times)`);
-    }
+  return [...state.diagnosticCounts]
+    .map(([message, count]) => (count > 1 ? `${message} (${count.toLocaleString()} times)` : message))
+    .slice(0, diagnosticSampleLimit);
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new DOMException("The operation was cancelled", "AbortError");
   }
-  return [...state.diagnostics, ...summaries].slice(0, diagnosticSampleLimit);
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
 }
 
 function validWindow(start: number, end: number): boolean {

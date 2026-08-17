@@ -79,7 +79,18 @@ p {
     radial-gradient(circle at 18% 42%, oklch(0.56 0.11 148 / 0.2) 0 4px, transparent 5px),
     radial-gradient(circle at 78% 22%, oklch(0.56 0.11 148 / 0.16) 0 3px, transparent 4px),
     radial-gradient(circle at 61% 74%, oklch(0.56 0.11 148 / 0.14) 0 3px, transparent 4px),
-    linear-gradient(115deg, transparent 9%, oklch(0.58 0.09 148 / 0.13) 9.2%, transparent 9.8%, transparent 39%, oklch(0.58 0.09 148 / 0.12) 39.2%, transparent 39.8%, transparent 72%, oklch(0.58 0.09 148 / 0.1) 72.2%, transparent 72.8%);
+    linear-gradient(
+      115deg,
+      transparent 9%,
+      oklch(0.58 0.09 148 / 0.13) 9.2%,
+      transparent 9.8%,
+      transparent 39%,
+      oklch(0.58 0.09 148 / 0.12) 39.2%,
+      transparent 39.8%,
+      transparent 72%,
+      oklch(0.58 0.09 148 / 0.1) 72.2%,
+      transparent 72.8%
+    );
   mask-image: radial-gradient(ellipse at center, black 0 48%, transparent 75%);
 }
 
@@ -119,7 +130,9 @@ p {
   align-items: center;
   width: 154px;
   text-decoration: none;
-  transition: transform 170ms cubic-bezier(0.22, 1, 0.36, 1), filter 170ms ease;
+  transition:
+    transform 170ms cubic-bezier(0.22, 1, 0.36, 1),
+    filter 170ms ease;
 }
 
 .app-store-badge:hover {
@@ -250,7 +263,11 @@ p {
   letter-spacing: -0.006em;
   text-decoration: none;
   cursor: pointer;
-  transition: transform 170ms cubic-bezier(0.22, 1, 0.36, 1), background 170ms ease, border-color 170ms ease, color 170ms ease;
+  transition:
+    transform 170ms cubic-bezier(0.22, 1, 0.36, 1),
+    background 170ms ease,
+    border-color 170ms ease,
+    color 170ms ease;
 }
 
 .primary-button {
@@ -292,32 +309,14 @@ p {
   padding: 0 24px 28px;
 }
 
-.privacy-list {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 9px;
-  margin: 0;
-  padding: 0;
+.privacy-statement {
+  width: min(640px, 100%);
+  margin: 0 auto;
   color: var(--quiet);
   font-size: 0.84rem;
-  list-style: none;
+  line-height: 1.55;
+  text-align: center;
 }
-
-.privacy-list li {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.privacy-list li::before {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--accent);
-  content: "";
-}
-
 
 .working-stage {
   grid-template-rows: 18px 94px 28px auto;
@@ -437,6 +436,22 @@ p {
   font-weight: 730;
 }
 
+.cancel-button {
+  margin-top: 22px;
+  border: 1px solid color-mix(in oklab, var(--danger) 42%, transparent);
+  border-radius: 999px;
+  padding: 9px 18px;
+  min-height: 40px;
+  color: var(--danger);
+  background: var(--danger-soft);
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.cancel-button:hover {
+  background: color-mix(in oklab, var(--danger-soft) 72%, var(--danger));
+}
+
 .hidden-input {
   display: none;
 }
@@ -522,5 +537,4 @@ p {
   .saved-pill {
     width: 100%;
   }
-
 }

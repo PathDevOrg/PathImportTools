@@ -1,5 +1,5 @@
-import { chromium } from "playwright";
 import { strToU8, zipSync } from "fflate";
+import { chromium } from "playwright";
 import { withPreview } from "./smoke-common.mjs";
 
 await withPreview(4181, async (baseUrl) => {
@@ -17,27 +17,36 @@ await withPreview(4181, async (baseUrl) => {
   });
 
   const arcArchive = zipSync({
-    "Export/JSON/Daily/2024-05-01.json": strToU8(JSON.stringify({
-      timelineItems: [
-        {
-          isVisit: false,
-          startDate: "2024-05-01T10:00:00Z",
-          endDate: "2024-05-01T10:20:00Z",
-          activityType: "walk",
-          samples: [{ date: "2024-05-01T10:00:00Z", latitude: -33.8688, longitude: 151.2093, horizontalAccuracy: 8 }]
-        }
-      ]
-    }))
+    "Export/JSON/Daily/2024-05-01.json": strToU8(
+      JSON.stringify({
+        timelineItems: [
+          {
+            isVisit: false,
+            startDate: "2024-05-01T10:00:00Z",
+            endDate: "2024-05-01T10:20:00Z",
+            activityType: "walk",
+            samples: [{ date: "2024-05-01T10:00:00Z", latitude: -33.8688, longitude: 151.2093, horizontalAccuracy: 8 }],
+          },
+        ],
+      }),
+    ),
   });
   const movesArchive = zipSync({
-    "moves_export/json/daily/storyline/storyline_20140401.json": strToU8(JSON.stringify([
-      {
-        date: "20140401",
-        segments: [
-          { type: "place", startTime: "20140401T080000+0300", endTime: "20140401T090000+0300", place: { id: 42, name: "Home", location: { lat: 60.17, lon: 24.94 } } }
-        ]
-      }
-    ]))
+    "moves_export/json/daily/storyline/storyline_20140401.json": strToU8(
+      JSON.stringify([
+        {
+          date: "20140401",
+          segments: [
+            {
+              type: "place",
+              startTime: "20140401T080000+0300",
+              endTime: "20140401T090000+0300",
+              place: { id: 42, name: "Home", location: { lat: 60.17, lon: 24.94 } },
+            },
+          ],
+        },
+      ]),
+    ),
   });
 
   // 1) Online warmup. Load the page, take it through one full conversion so all assets (including wasm) are read.
@@ -49,7 +58,9 @@ await withPreview(4181, async (baseUrl) => {
     input?.removeAttribute("directory");
   });
   await page.locator("input[type=file]").setInputFiles({
-    name: "arc-export.zip", mimeType: "application/zip", buffer: Buffer.from(arcArchive)
+    name: "arc-export.zip",
+    mimeType: "application/zip",
+    buffer: Buffer.from(arcArchive),
   });
   await page.getByText("Import file ready").waitFor({ timeout: 30_000 });
   console.log("[online] conversion reached Import file ready");
@@ -70,10 +81,15 @@ await withPreview(4181, async (baseUrl) => {
   });
 
   // 5) Page should be served from cache. Verify the React app actually boots.
-  await page.waitForFunction(() => !!document.querySelector("button") && document.body.innerText.includes("Select backup folder"), { timeout: 30_000 }).catch(async () => {
-    const html = await page.evaluate(() => document.documentElement.outerHTML.slice(0, 1500));
-    console.log("[offline] page did not boot from cache. HTML head:", html);
-  });
+  await page
+    .waitForFunction(
+      () => !!document.querySelector("button") && document.body.innerText.includes("Select backup folder"),
+      { timeout: 30_000 },
+    )
+    .catch(async () => {
+      const html = await page.evaluate(() => document.documentElement.outerHTML.slice(0, 1500));
+      console.log("[offline] page did not boot from cache. HTML head:", html);
+    });
 
   await page.evaluate(() => {
     const input = document.querySelector("input[type=file]");
@@ -83,11 +99,16 @@ await withPreview(4181, async (baseUrl) => {
 
   // 6) Trigger the moves-only conversion offline. wasm will be served from cache.
   await page.locator("input[type=file]").setInputFiles({
-    name: "moves-only.zip", mimeType: "application/zip", buffer: Buffer.from(movesArchive)
+    name: "moves-only.zip",
+    mimeType: "application/zip",
+    buffer: Buffer.from(movesArchive),
   });
-  await page.getByText("Import file ready").waitFor({ timeout: 30_000 }).catch(async () => {
-    console.log("[offline] did not reach Import file ready after offline conversion");
-  });
+  await page
+    .getByText("Import file ready")
+    .waitFor({ timeout: 30_000 })
+    .catch(async () => {
+      console.log("[offline] did not reach Import file ready after offline conversion");
+    });
   const bodyText = await page.evaluate(() => document.body.innerText);
   await page.screenshot({ path: "/tmp/offline-moves-conversion.png", fullPage: true });
   await browser.close();

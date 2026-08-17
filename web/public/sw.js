@@ -1,4 +1,4 @@
-const cacheName = "path-import-v1";
+const cacheName = "path-import-v2";
 const manifestUrl = "/cache-manifest.json";
 
 const precacheBasePaths = [
@@ -8,34 +8,50 @@ const precacheBasePaths = [
   "/favicon.png",
   "/apple-touch-icon.png",
   "/path-logo.png",
-  "/download-on-the-app-store.svg"
+  "/download-on-the-app-store.svg",
+  "/sqlite3.wasm",
 ];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil((async () => {
-    const cache = await caches.open(cacheName);
-    const tried = [...precacheBasePaths, manifestUrl];
-    await cache.addAll(tried).catch(() => undefined);
-    let manifestPaths = [];
-    try {
-      const manifestResponse = await fetch(manifestUrl);
-      if (manifestResponse.ok) {
-        manifestPaths = (await manifestResponse.json());
-        await cache.addAll(manifestPaths).catch(() => undefined);
+  event.waitUntil(
+    (async () => {
+      const cache = await caches.open(cacheName);
+      const tried = [...precacheBasePaths, manifestUrl];
+      await cache.addAll(tried).catch(() => undefined);
+      let manifestPaths = [];
+      try {
+        const manifestResponse = await fetch(manifestUrl);
+        if (manifestResponse.ok) {
+          manifestPaths = await manifestResponse.json();
+          await cache.addAll(manifestPaths).catch(() => undefined);
+        }
+      } catch {
+        // online-in-development may serve no manifest; SW degrades to runtime-caching
       }
-    } catch {
-      // online-in-development may serve no manifest; SW degrades to runtime-caching
-    }
-    await self.skipWaiting();
-  })());
+      await self.skipWaiting();
+    })(),
+  );
 });
 
 self.addEventListener("activate", (event) => {
-  event.waitUntil((async () => {
-    const keys = await caches.keys();
-    await Promise.all(keys.filter((key) => key !== cacheName).map((key) => caches.delete(key)));
-    await self.clients.claim();
-  })());
+  event.waitUntil(
+    (async () => {
+      const keys = await caches.keys();
+      await Promise.all(keys.filter((key) => key !== cacheName).map((key) => caches.delete(key)));
+      await self.clients.claim();
+    })(),
+  );
+});
+
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "warm-offline-assets") {
+    const port = event.ports[0];
+    event.waitUntil(
+      warmOfflineAssets(event.data.urls ?? []).then(() => {
+        port?.postMessage("warm-complete");
+      }),
+    );
+  }
 });
 
 self.addEventListener("fetch", (event) => {
@@ -50,28 +66,42 @@ self.addEventListener("fetch", (event) => {
   if (!isCacheablePath(url.pathname)) {
     return;
   }
-  event.respondWith((async () => {
-    const cache = await caches.open(cacheName);
-    const cached = await cache.match(request);
-    if (cached) {
-      void updateCacheInBackground(cache, request);
-      return cached;
-    }
-    try {
-      const networkResponse = await fetch(request);
-      if (networkResponse.ok) {
-        cache.put(request, networkResponse.clone()).catch(() => undefined);
+  event.respondWith(
+    (async () => {
+      const cache = await caches.open(cacheName);
+      const cached = await cache.match(request);
+      if (cached) {
+        void updateCacheInBackground(cache, request);
+        return cached;
       }
-      return networkResponse;
-    } catch (error) {
-      const fallback = await cache.match(url.pathname) ?? await cache.match("/index.html");
-      if (fallback) {
-        return fallback;
+      try {
+        const networkResponse = await fetch(request);
+        if (networkResponse.ok) {
+          cache.put(request, networkResponse.clone()).catch(() => undefined);
+        }
+        return networkResponse;
+      } catch (error) {
+        const fallback = (await cache.match(url.pathname)) ?? (await cache.match("/index.html"));
+        if (fallback) {
+          return fallback;
+        }
+        throw error;
       }
-      throw error;
-    }
-  })());
+    })(),
+  );
 });
+
+async function warmOfflineAssets(urls) {
+  const cache = await caches.open(cacheName);
+  const sameOriginUrls = urls.filter((url) => {
+    try {
+      return new URL(url).origin === self.location.origin;
+    } catch {
+      return false;
+    }
+  });
+  await Promise.allSettled(sameOriginUrls.map((url) => cache.add(url)));
+}
 
 async function updateCacheInBackground(cache, request) {
   try {
@@ -91,5 +121,19 @@ function isCacheablePath(pathname) {
   if (pathname.startsWith("/assets/")) {
     return true;
   }
-  return ["/favicon.ico", "/favicon.png", "/apple-touch-icon.png", "/path-logo.png", "/download-on-the-app-store.svg"].includes(pathname);
+  if (
+    pathname.startsWith("/@fs/") ||
+    pathname.startsWith("/@vite/") ||
+    pathname.startsWith("/src/") ||
+    pathname.startsWith("/node_modules/")
+  ) {
+    return true;
+  }
+  return [
+    "/favicon.ico",
+    "/favicon.png",
+    "/apple-touch-icon.png",
+    "/path-logo.png",
+    "/download-on-the-app-store.svg",
+  ].includes(pathname);
 }

@@ -8,7 +8,7 @@ import { getLatestSchemaVersion, schemaFile } from "../src/index.js";
 
 const configuredAppSchemaPath = process.env.AURA_SCHEMA_PATH;
 const appSchemaPath = resolve(configuredAppSchemaPath ?? "../Aura/Core/Database/Migrations/Schema.sql");
-const pinnedV12SchemaSha256 = "eff8f3c0a0552d7d411a004e4d9e2d83889917eed0f085a452a389f8d4de763b";
+const pinnedV12SchemaSha256 = "af456c0d2e855f14fc0fc658696bba0afda302ba135fd0eb9b8bc72005f415d3";
 
 describe("Aura schema metadata", () => {
   test("describes one directly installable V12 schema", () => {

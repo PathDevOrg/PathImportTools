@@ -1,4 +1,3 @@
--- Aura Importer one-shot Path schema, version 12.
 PRAGMA foreign_keys = ON;
 PRAGMA temp_store = MEMORY;
 CREATE TABLE devices (
@@ -543,8 +542,6 @@ SELECT
     m.mode as move_mode,
     m.distance_m as move_distance_m,
     -- Performance Optimization:
-    -- 这里的子查询在 3GB+ 大数据库上会导致严重的读取放大和 UI 卡顿。
-    -- 我们将其替换为 NULL, 改由 Swift 层进行 "Hybrid Fallback" (按需查询)。
     NULL as move_steps
 FROM timeline_events te
 LEFT JOIN stays s ON te.stay_id = s.id
@@ -554,9 +551,6 @@ CREATE TABLE map_snapshots (
   id               INTEGER PRIMARY KEY,
   cache_key        TEXT NOT NULL UNIQUE, -- e.g. "move_123", "day_20231027", "month_202310"
   file_path        TEXT NOT NULL,        -- e.g. "Snapshots/month_202310.png"
-  data_version_tag TEXT,                 -- 用于检测数据源是否变更
-  width            INTEGER,              -- 图片宽度 (px)
-  height           INTEGER,              -- 图片高度 (px)
   theme            TEXT,                 -- e.g. "light", "dark"
   created_ts       REAL NOT NULL DEFAULT (unixepoch()),
   last_access_ts   REAL NOT NULL DEFAULT (unixepoch())

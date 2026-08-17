@@ -14,9 +14,13 @@
     "security:deps": "node scripts/check-supply-chain.mjs",
     "typecheck": "tsc -b tsconfig.json",
     "test:smoke": "node scripts/smoke-web.mjs",
-    "deploy:cloudflare": "npx wrangler deploy"
+    "deploy:cloudflare": "npm run build && npx wrangler deploy",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "preview": "npm run preview -w @aura-importer/web"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.8",
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
