@@ -1,4 +1,4 @@
-import { getLatestSchemaVersion } from "@aura-importer/aura-schema";
+import { schemaFile } from "@aura-importer/aura-schema";
 import { encodeBQDCPath } from "./bqdc.js";
 import {
   defaultBqdcQuantizationCm,
@@ -98,6 +98,11 @@ type TimedRoutePoint = {
 type PreparedRoute = {
   points: TimedRoutePoint[];
   pathQuality: "raw" | "filtered";
+};
+
+type TimezoneOffsets = {
+  start: number | null;
+  end: number | null;
 };
 
 type RouteEvidence = {
@@ -557,7 +562,9 @@ function movesPlaceIdentity(place: JsonObject): { id: string | null; rank: numbe
   return {
     id,
     rank: facebookId ? 3 : foursquareId ? 2 : temporaryId ? 1 : 0,
-    aliases: [...new Set([id, temporaryId].filter((value): value is string => value !== null))],
+    aliases: [facebookId, foursquareId, temporaryId].filter(
+      (value, index, values): value is string => value !== null && values.indexOf(value) === index,
+    ),
   };
 }
 
@@ -1286,7 +1293,13 @@ function importFusedArcItem(fused: FusedArcItem, ledger: EvidenceLedger, state: 
     const start = arcItemStart(item);
     const end = arcItemEnd(item);
     if (Number.isFinite(start) && Number.isFinite(end)) {
-      insertImportGap(state, start, end, timelineNote.arcLowConfidence);
+      insertImportGap(
+        state,
+        start,
+        end,
+        timelineNote.arcLowConfidence,
+        arcTimelineTimezoneOffsets(item, samples as JsonObject[], state),
+      );
       recordDiagnostic(state, "Replaced unsupported low-confidence Arc activity with a gap");
     }
     return;
@@ -1529,12 +1542,13 @@ function reconstructArcInterval(
       ? ledger.unlinkedObservationsBetween(start, end, orphanTimelineItemIds)
       : ledger.observationsBetween(start, end)
   ) as JsonObject[];
+  const timezoneOffsets = timezoneOffsetsFromSamples(samples);
   const times = samples
     .map(sampleTimestamp)
     .filter((value): value is number => value !== null)
     .sort((lhs, rhs) => lhs - rhs);
   if (times.length < 2) {
-    insertImportGap(state, start, end, timelineNote.arcFragmentLowEvidence);
+    insertImportGap(state, start, end, timelineNote.arcFragmentLowEvidence, timezoneOffsets);
     return;
   }
   const deltas = times
@@ -1545,12 +1559,18 @@ function reconstructArcInterval(
   const reconstructedStart = Math.max(start, times[0]!);
   const reconstructedEnd = Math.min(end, times.at(-1)! + extension);
   if (!(reconstructedEnd > reconstructedStart)) {
-    insertImportGap(state, start, end, timelineNote.arcFragmentLowEvidence);
+    insertImportGap(state, start, end, timelineNote.arcFragmentLowEvidence, timezoneOffsets);
     return;
   }
 
-  insertImportGap(state, start, reconstructedStart, timelineNote.arcFragmentUnobserved);
-  insertImportGap(state, reconstructedEnd, end, timelineNote.arcFragmentUnobserved);
+  insertImportGap(state, start, reconstructedStart, timelineNote.arcFragmentUnobserved, {
+    start: timezoneOffsets.start,
+    end: timezoneOffsets.start,
+  });
+  insertImportGap(state, reconstructedEnd, end, timelineNote.arcFragmentUnobserved, {
+    start: timezoneOffsets.end,
+    end: timezoneOffsets.end,
+  });
 
   const preparedRoute = prepareRouteFromSamples(samples);
   const routePoints = preparedRoute.points;
@@ -1633,7 +1653,8 @@ function reconstructArcInterval(
       end: reconstructedEnd,
       mode: mapActivityType(activity),
       distance,
-      tzOffset: timezoneOffsetValue(samples[0]?.secondsFromGMT),
+      tzOffset: timezoneOffsets.start,
+      endTzOffset: timezoneOffsets.end,
       provider: providers.arcReconstruction,
     });
     insertRoutePath(
@@ -1648,7 +1669,7 @@ function reconstructArcInterval(
     return;
   }
 
-  insertImportGap(state, reconstructedStart, reconstructedEnd, timelineNote.arcFragmentLowEvidence);
+  insertImportGap(state, reconstructedStart, reconstructedEnd, timelineNote.arcFragmentLowEvidence, timezoneOffsets);
   recordDiagnostic(state, "Replaced fragmented Arc window with a low-evidence gap");
 }
 
@@ -1696,7 +1717,13 @@ function geometryOnlyMoveIsSupported(points: TimedRoutePoint[], samples: JsonObj
   return displacement >= Math.max(minimumReconstructedMoveDistanceM, 2 * (horizontalAccuracy ?? 0));
 }
 
-function insertImportGap(state: MutableState, start: number, end: number, notes: string): void {
+function insertImportGap(
+  state: MutableState,
+  start: number,
+  end: number,
+  notes: string,
+  timezoneOffsets: TimezoneOffsets = { start: null, end: null },
+): void {
   if (end <= start) {
     return;
   }
@@ -1707,12 +1734,52 @@ function insertImportGap(state: MutableState, start: number, end: number, notes:
     reason: "Unknown",
     uncertainty: null,
     notes,
+    tz_offset_s: timezoneOffsets.start,
+    end_tz_offset_s: timezoneOffsets.end,
   });
 }
 
 function sampleTimestamp(sample: JsonObject): number | null {
   const location = asObject(sample.location);
   return parseImportTimestamp(stringValue(location?.timestamp) ?? stringValue(sample.date));
+}
+
+function arcTimelineTimezoneOffsets(item: JsonObject, samples: JsonObject[], state: MutableState): TimezoneOffsets {
+  const place = asObject(item.place);
+  const placeId = stringValue(item.placeId) ?? stringValue(place?.placeId);
+  const fallback =
+    timezoneOffsetValue(item.secondsFromGMT) ??
+    timezoneOffsetValue(place?.secondsFromGMT) ??
+    (placeId ? (state.arcPlaces.get(placeId)?.timezoneOffset ?? null) : null);
+  return timezoneOffsetsFromSamples(samples, fallback);
+}
+
+function timezoneOffsetsFromSamples(samples: JsonObject[], fallback: number | null = null): TimezoneOffsets {
+  const offsets = samples
+    .map((sample, index) => ({
+      index,
+      timestamp: sampleTimestamp(sample),
+      offset: timezoneOffsetValue(sample.secondsFromGMT),
+    }))
+    .filter((sample): sample is { index: number; timestamp: number | null; offset: number } => sample.offset !== null)
+    .sort(
+      (lhs, rhs) =>
+        (lhs.timestamp ?? Number.POSITIVE_INFINITY) - (rhs.timestamp ?? Number.POSITIVE_INFINITY) ||
+        lhs.index - rhs.index,
+    );
+  return {
+    start: offsets[0]?.offset ?? fallback,
+    end: offsets.at(-1)?.offset ?? fallback,
+  };
+}
+
+function timezoneOffsetsFromTimestamps(start: string | null, end: string | null): TimezoneOffsets {
+  const startOffset = extractTimezoneOffsetSeconds(start);
+  const endOffset = extractTimezoneOffsetSeconds(end);
+  return {
+    start: startOffset ?? endOffset,
+    end: endOffset ?? startOffset,
+  };
 }
 
 function sampleActivity(sample: JsonObject): string | null {
@@ -2193,7 +2260,8 @@ function addMovesTrackPointEvidence(day: JsonObject, ledger: EvidenceLedger): vo
 
 function addMovesTrackPoints(points: JsonObject[], ledger: EvidenceLedger, parentItemId: string): void {
   for (const point of points) {
-    const timestamp = stringValue(point.time) ?? stringValue(point.timestamp);
+    const normalized = normalizedMovesTrackPoint(point);
+    const timestamp = normalized.timestamp;
     const offset = extractTimezoneOffsetSeconds(timestamp);
     if (!timestamp) {
       continue;
@@ -2204,8 +2272,8 @@ function addMovesTrackPoints(points: JsonObject[], ledger: EvidenceLedger, paren
         secondsFromGMT: offset,
         location: {
           timestamp,
-          latitude: point.lat ?? point.latitude,
-          longitude: point.lon ?? point.longitude,
+          latitude: normalized.lat,
+          longitude: normalized.lon,
         },
       },
       parentItemId,
@@ -2226,15 +2294,15 @@ function importArcTimelineItem(
   importRawEvidence = true,
 ): void {
   const samples = arrayValue(item.samples);
-  const tzOffset = timezoneOffsetValue(samples[0]?.secondsFromGMT) ?? timezoneOffsetValue(item.secondsFromGMT);
+  const timezoneOffsets = arcTimelineTimezoneOffsets(item, samples, state);
   const itemId = stringValue(item.itemId);
   if (item.isVisit === true) {
-    const stayId = importArcStay(item, state, tzOffset, provider !== providers.arcReconstruction);
+    const stayId = importArcStay(item, state, timezoneOffsets, provider !== providers.arcReconstruction);
     if (itemId && stayId !== null) {
       state.itemMap.set(itemId, { kind: "stay", ids: [stayId] });
     }
   } else {
-    const moveId = importArcMove(item, state, tzOffset, provider);
+    const moveId = importArcMove(item, state, timezoneOffsets, provider);
     if (itemId && moveId !== null) {
       state.itemMap.set(itemId, { kind: "move", ids: [moveId] });
     }
@@ -2247,7 +2315,7 @@ function importArcTimelineItem(
 function importArcStay(
   item: JsonObject,
   state: MutableState,
-  tzOffset: number | null,
+  timezoneOffsets: TimezoneOffsets,
   recordRawVisit: boolean,
 ): number | null {
   const start = parseImportTimestamp(stringValue(item.startDate));
@@ -2291,7 +2359,8 @@ function importArcStay(
     radius_m: radiusMeters,
     type,
     poi_id: poiId,
-    tz_offset_s: tzOffset,
+    tz_offset_s: timezoneOffsets.start,
+    end_tz_offset_s: timezoneOffsets.end,
   };
   state.rows.stays.push(row);
   recordSemanticEvidence(state, "stay", row.id, {
@@ -2311,7 +2380,7 @@ function importArcStay(
       lat: center.lat,
       lon: center.lon,
       horizontal_acc_m: positiveNumber(numberValue(radius?.mean)),
-      tz_offset_s: tzOffset,
+      tz_offset_s: timezoneOffsets.start,
     });
   }
 
@@ -2321,7 +2390,7 @@ function importArcStay(
 function importArcMove(
   item: JsonObject,
   state: MutableState,
-  tzOffset: number | null,
+  timezoneOffsets: TimezoneOffsets,
   provider: string,
 ): number | null {
   const start = parseImportTimestamp(stringValue(item.startDate));
@@ -2350,7 +2419,8 @@ function importArcMove(
     end,
     mode,
     distance,
-    tzOffset,
+    tzOffset: timezoneOffsets.start,
+    endTzOffset: timezoneOffsets.end,
     provider,
     manual: item.manualActivityType === true || stringValue(item.confirmedType) !== null,
     revision: revisionValue(item),
@@ -2425,9 +2495,7 @@ function importArcBackupTimelineItem(item: JsonObject, state: MutableState): voi
   const start = parseImportTimestamp(stringValue(item.startDate));
   const end = parseImportTimestamp(stringValue(item.endDate));
   const placeId = stringValue(item.placeId);
-  const tzOffset =
-    timezoneOffsetValue(item.secondsFromGMT) ??
-    (placeId ? (state.arcPlaces.get(placeId)?.timezoneOffset ?? null) : null);
+  const timezoneOffsets = arcTimelineTimezoneOffsets(item, arrayValue(item.samples), state);
   if (!itemId || start === null || end === null || !validWindow(start, end)) {
     recordDiagnostic(state, "Skipped backup timeline item with invalid time window");
     return;
@@ -2455,7 +2523,8 @@ function importArcBackupTimelineItem(item: JsonObject, state: MutableState): voi
       radius_m: poi?.radius_m ?? place?.radius ?? defaultStayRadiusM,
       type: "venue",
       poi_id: poiId,
-      tz_offset_s: tzOffset,
+      tz_offset_s: timezoneOffsets.start,
+      end_tz_offset_s: timezoneOffsets.end,
     };
     state.rows.stays.push(stay);
     recordSemanticEvidence(state, "stay", stay.id, {
@@ -2475,7 +2544,7 @@ function importArcBackupTimelineItem(item: JsonObject, state: MutableState): voi
       lat: center.lat,
       lon: center.lon,
       horizontal_acc_m: poi?.radius_m ?? place?.radius ?? null,
-      tz_offset_s: tzOffset,
+      tz_offset_s: timezoneOffsets.start,
     });
     state.itemMap.set(itemId, { kind: "stay", ids: [stay.id] });
   } else {
@@ -2484,7 +2553,8 @@ function importArcBackupTimelineItem(item: JsonObject, state: MutableState): voi
       end,
       mode: mapActivityType(stringValue(item.activityType)),
       distance: null,
-      tzOffset,
+      tzOffset: timezoneOffsets.start,
+      endTzOffset: timezoneOffsets.end,
       provider: providers.arcBackup,
       manual: item.manualActivityType === true || stringValue(item.confirmedType) !== null,
       revision: revisionValue(item),
@@ -2543,6 +2613,8 @@ function importArcBackupRoutes(samples: JsonObject[], state: MutableState): void
             move.distance_m = routeDistance;
           }
           move.tz_offset_s = move.tz_offset_s ?? timezoneOffsetValue(routeSamples[0]?.secondsFromGMT);
+          move.end_tz_offset_s =
+            move.end_tz_offset_s ?? timezoneOffsetValue(routeSamples.at(-1)?.secondsFromGMT) ?? move.tz_offset_s;
           if (!state.rows.route_paths.some((path) => path.move_id === move.id)) {
             insertRoutePath(
               state,
@@ -2629,7 +2701,13 @@ function importMovesDay(day: JsonObject, state: MutableState): void {
 
 function importMovesActivitiesOnlyPlace(segment: JsonObject, state: MutableState, start: number, end: number): void {
   if (!hasSemanticCoverage(state, start, end)) {
-    insertImportGap(state, start, end, timelineNote.movesPlaceWithoutLocation);
+    insertImportGap(
+      state,
+      start,
+      end,
+      timelineNote.movesPlaceWithoutLocation,
+      timezoneOffsetsFromTimestamps(stringValue(segment.startTime), stringValue(segment.endTime)),
+    );
   }
   for (const activity of fuseMovesActivities(arrayValue(segment.activities))) {
     const activityStart = parseImportTimestamp(stringValue(activity.startTime));
@@ -2722,6 +2800,7 @@ function importMovesOff(segment: JsonObject, state: MutableState): void {
     recordDiagnostic(state, "Skipped Moves tracking-off segment with invalid time window");
     return;
   }
+  const timezoneOffsets = timezoneOffsetsFromTimestamps(stringValue(segment.startTime), stringValue(segment.endTime));
   state.rows.no_data_gaps.push({
     id: state.next.no_data_gaps++,
     start_ts: start,
@@ -2729,6 +2808,8 @@ function importMovesOff(segment: JsonObject, state: MutableState): void {
     reason: "Unknown",
     uncertainty: null,
     notes: timelineNote.movesTrackingOff,
+    tz_offset_s: timezoneOffsets.start,
+    end_tz_offset_s: timezoneOffsets.end,
   });
 }
 
@@ -2761,6 +2842,7 @@ function importMovesPlace(segment: JsonObject, state: MutableState, replacedStay
       )
     : null;
   const poiId = movesPoiId ?? replacedStay?.poiId ?? null;
+  const timezoneOffsets = timezoneOffsetsFromTimestamps(stringValue(segment.startTime), stringValue(segment.endTime));
 
   const stay: StayRow = {
     id: state.next.stays++,
@@ -2774,7 +2856,8 @@ function importMovesPlace(segment: JsonObject, state: MutableState, replacedStay
         ? "anchor"
         : (replacedStay?.type ?? "venue"),
     poi_id: poiId,
-    tz_offset_s: extractTimezoneOffsetSeconds(stringValue(segment.startTime)),
+    tz_offset_s: timezoneOffsets.start,
+    end_tz_offset_s: timezoneOffsets.end,
   };
   state.rows.stays.push(stay);
   recordSemanticEvidence(state, "stay", stay.id, {
@@ -2908,12 +2991,14 @@ function importMovesMove(segment: JsonObject, state: MutableState): void {
     const preparedRoute = prepareRouteFromTrackPoints(arrayValue(segment.trackPoints), start, end);
     const routePoints = preparedRoute.points;
     const coords = routePoints.map((point) => point.coord);
+    const timezoneOffsets = timezoneOffsetsFromTimestamps(stringValue(segment.startTime), stringValue(segment.endTime));
     const move = insertMove(state, {
       start,
       end,
       mode: mapActivityType(stringValue(segment.activity)),
       distance: positiveNumber(numberValue(segment.distance)) ?? calculatePathDistance(coords),
-      tzOffset: extractTimezoneOffsetSeconds(stringValue(segment.startTime)),
+      tzOffset: timezoneOffsets.start,
+      endTzOffset: timezoneOffsets.end,
       provider: providers.movesExport,
       manual: segment.manual === true,
       revision: movesRevisionValue(segment, segment),
@@ -2943,11 +3028,20 @@ function importMovesMove(segment: JsonObject, state: MutableState): void {
         activity,
         start: Math.max(activityStart, start),
         end: Math.min(activityEnd, end),
+        startTime: activityStart >= start ? stringValue(activity.startTime) : stringValue(segment.startTime),
+        endTime: activityEnd <= end ? stringValue(activity.endTime) : stringValue(segment.endTime),
       };
     })
     .filter(
-      (activity): activity is { activity: JsonObject; start: number; end: number } =>
-        activity !== null && activity.end > activity.start,
+      (
+        activity,
+      ): activity is {
+        activity: JsonObject;
+        start: number;
+        end: number;
+        startTime: string | null;
+        endTime: string | null;
+      } => activity !== null && activity.end > activity.start,
     )
     .sort((lhs, rhs) => lhs.start - rhs.start);
 
@@ -2965,12 +3059,14 @@ function importMovesMove(segment: JsonObject, state: MutableState): void {
     );
     const routePoints = preparedRoute.points;
     const effectiveCoords = routePoints.map((point) => point.coord);
+    const timezoneOffsets = timezoneOffsetsFromTimestamps(normalizedActivity.startTime, normalizedActivity.endTime);
     const move = insertMove(state, {
       start: normalizedActivity.start,
       end: normalizedActivity.end,
       mode: mapActivityType(stringValue(activity.activity)),
       distance: positiveNumber(numberValue(activity.distance)) ?? calculatePathDistance(effectiveCoords),
-      tzOffset: extractTimezoneOffsetSeconds(stringValue(activity.startTime)),
+      tzOffset: timezoneOffsets.start,
+      endTzOffset: timezoneOffsets.end,
       provider: providers.movesExport,
       manual: activity.manual === true || segment.manual === true,
       revision: Math.max(activityRevisionValue(activity, 0), movesRevisionValue(segment, segment)),
@@ -3197,6 +3293,7 @@ function insertMove(
     mode: MoveMode;
     distance: number | null;
     tzOffset: number | null;
+    endTzOffset: number | null;
     provider: string;
     manual?: boolean;
     revision?: number;
@@ -3212,12 +3309,15 @@ function insertMove(
       duplicate.provider = input.provider;
       duplicate.distance_m = input.distance ?? duplicate.distance_m;
       duplicate.tz_offset_s = input.tzOffset ?? duplicate.tz_offset_s;
+      duplicate.end_tz_offset_s = input.endTzOffset ?? duplicate.end_tz_offset_s;
       state.semanticEvidence.set(`move:${duplicate.id}`, {
         manual: input.manual === true,
         revision: input.revision ?? 0,
         source: "moves",
       });
     } else {
+      duplicate.tz_offset_s ??= input.tzOffset;
+      duplicate.end_tz_offset_s ??= input.endTzOffset;
       recordSemanticEvidence(state, "move", duplicate.id, {
         manual: input.manual === true,
         revision: input.revision ?? 0,
@@ -3234,6 +3334,7 @@ function insertMove(
     mode: input.mode,
     distance_m: input.distance,
     tz_offset_s: input.tzOffset,
+    end_tz_offset_s: input.endTzOffset,
     provider: input.provider,
   };
   state.rows.moves.push(row);
@@ -3856,9 +3957,9 @@ function prepareRouteFromTrackPoints(
 ): PreparedRoute {
   const candidates: TimedRoutePoint[] = [];
   for (const point of points) {
-    const lat = numberValue(point.lat);
-    const lon = numberValue(point.lon);
-    const ts = parseImportTimestamp(stringValue(point.time));
+    const normalized = normalizedMovesTrackPoint(point);
+    const { lat, lon } = normalized;
+    const ts = parseImportTimestamp(normalized.timestamp);
     if (lat !== null && lon !== null && validLatLon(lat, lon)) {
       candidates.push({ coord: [lon, lat], ts });
     }
@@ -3876,6 +3977,18 @@ function prepareRouteFromTrackPoints(
   return {
     points: prepared.points,
     pathQuality: prepared.pathQuality === "filtered" || withinWindow.length !== candidates.length ? "filtered" : "raw",
+  };
+}
+
+function normalizedMovesTrackPoint(point: JsonObject): {
+  lat: number | null;
+  lon: number | null;
+  timestamp: string | null;
+} {
+  return {
+    lat: numberValue(point.lat) ?? numberValue(point.latitude),
+    lon: numberValue(point.lon) ?? numberValue(point.longitude),
+    timestamp: stringValue(point.time) ?? stringValue(point.timestamp),
   };
 }
 
@@ -4032,13 +4145,13 @@ function normalizeOneRef(
           return;
         }
         if (alignsCrossSourceMoveBoundary && currentEnd - previousEnd <= 1) {
-          previous.row.end_ts = currentEnd;
+          setSemanticEnd(previous, currentEnd, semanticEndTimezoneOffset(current));
           preserveExactMoveGeometry(state, previous, current);
           removeSemanticRow(context, current);
           recordDiagnostic(state, "Absorbed one-second cross-source move boundary residual");
           return;
         }
-        current.row.start_ts = previousEnd;
+        setSemanticStart(current, previousEnd, semanticEndTimezoneOffset(previous));
         invalidateMoveGeometry(context, current);
         recordDiagnostic(state, "Shifted lower-quality overlapping timeline event");
         continue;
@@ -4048,14 +4161,14 @@ function normalizeOneRef(
       const suffixResidual = previousEnd - currentEnd;
       if (alignsCrossSourceMoveBoundary && prefixResidual <= 1) {
         if (suffixResidual > 1 && Number.isFinite(currentEnd)) {
-          const suffix = cloneSemanticSuffix(state, context, previous, currentEnd);
+          const suffix = cloneSemanticSuffix(state, context, previous, currentEnd, semanticEndTimezoneOffset(current));
           if (suffix) {
             enqueueSuffix(suffix);
           }
         } else if (suffixResidual > 0) {
-          current.row.end_ts = previousEnd;
+          setSemanticEnd(current, previousEnd, semanticEndTimezoneOffset(previous));
         }
-        current.row.start_ts = previous.row.start_ts;
+        setSemanticStart(current, previous.row.start_ts, semanticStartTimezoneOffset(previous));
         normalized.pop();
         preserveExactMoveGeometry(state, current, previous);
         removeSemanticRow(context, previous);
@@ -4064,7 +4177,7 @@ function normalizeOneRef(
       }
 
       if (alignsCrossSourceMoveBoundary && suffixResidual > 0 && suffixResidual <= 1) {
-        current.row.end_ts = previousEnd;
+        setSemanticEnd(current, previousEnd, semanticEndTimezoneOffset(previous));
       }
 
       if (current.row.start_ts <= previous.row.start_ts) {
@@ -4076,14 +4189,20 @@ function normalizeOneRef(
       }
 
       if (semanticEnd(previous) > semanticEnd(current) && Number.isFinite(semanticEnd(current))) {
-        const suffix = cloneSemanticSuffix(state, context, previous, semanticEnd(current));
+        const suffix = cloneSemanticSuffix(
+          state,
+          context,
+          previous,
+          semanticEnd(current),
+          semanticEndTimezoneOffset(current),
+        );
         if (suffix) {
           enqueueSuffix(suffix);
         }
       }
 
       if (current.row.start_ts > previous.row.start_ts) {
-        previous.row.end_ts = current.row.start_ts;
+        setSemanticEnd(previous, current.row.start_ts, semanticStartTimezoneOffset(current));
         invalidateMoveGeometry(context, previous);
         recordDiagnostic(state, "Clipped overlapping timeline event");
         if (!hasPositiveDuration(previous)) {
@@ -4133,6 +4252,7 @@ function preserveExactMoveGeometry(state: MutableState, target: SemanticRef, sou
   const sourceMove = source.row as MoveRow;
   targetMove.distance_m ??= sourceMove.distance_m;
   targetMove.tz_offset_s ??= sourceMove.tz_offset_s;
+  targetMove.end_tz_offset_s ??= sourceMove.end_tz_offset_s;
   const targetHasRoute = state.rows.route_paths.some((route) => route.move_id === targetMove.id);
   if (!targetHasRoute) {
     for (const route of state.rows.route_paths.filter((candidate) => candidate.move_id === sourceMove.id)) {
@@ -4306,13 +4426,19 @@ function cloneSemanticSuffix(
   context: NormalizationContext,
   ref: SemanticRef,
   start: number,
+  startTimezoneOffset: number | null,
 ): SemanticRef | null {
   if (start >= semanticEnd(ref)) {
     return null;
   }
   if (ref.kind === "stay") {
     const row = ref.row as StayRow;
-    const suffix: StayRow = { ...row, id: state.next.stays++, start_ts: start };
+    const suffix: StayRow = {
+      ...row,
+      id: state.next.stays++,
+      start_ts: start,
+      tz_offset_s: startTimezoneOffset,
+    };
     state.rows.stays.push(suffix);
     for (const link of state.rows.stay_pois.filter((candidate) => candidate.stay_id === row.id)) {
       state.rows.stay_pois.push({ ...link, stay_id: suffix.id });
@@ -4322,7 +4448,13 @@ function cloneSemanticSuffix(
   }
   if (ref.kind === "move") {
     const row = ref.row as MoveRow;
-    const suffix: MoveRow = { ...row, id: state.next.moves++, start_ts: start, distance_m: null };
+    const suffix: MoveRow = {
+      ...row,
+      id: state.next.moves++,
+      start_ts: start,
+      distance_m: null,
+      tz_offset_s: startTimezoneOffset,
+    };
     state.rows.moves.push(suffix);
     const routeEvidence = state.routeEvidence.get(row.id);
     if (routeEvidence) {
@@ -4336,7 +4468,12 @@ function cloneSemanticSuffix(
     return { ...ref, kind: "move", row: suffix, quality: moveSemanticQuality(suffix, false) };
   }
   const row = ref.row as NoDataGapRow;
-  const suffix: NoDataGapRow = { ...row, id: state.next.no_data_gaps++, start_ts: start };
+  const suffix: NoDataGapRow = {
+    ...row,
+    id: state.next.no_data_gaps++,
+    start_ts: start,
+    tz_offset_s: startTimezoneOffset,
+  };
   state.rows.no_data_gaps.push(suffix);
   recordSemanticEvidence(state, "gap", suffix.id, ref);
   return { ...ref, kind: "gap", row: suffix };
@@ -4356,8 +4493,14 @@ function mergeSemanticRows(
   target: SemanticRef,
   source: SemanticRef,
 ): void {
-  target.row.end_ts =
-    target.row.end_ts === null || source.row.end_ts === null ? null : Math.max(target.row.end_ts, source.row.end_ts);
+  const targetEnd = target.row.end_ts;
+  const sourceEnd = source.row.end_ts;
+  const sourceDefinesEnd = targetEnd !== null && (sourceEnd === null || sourceEnd >= targetEnd);
+  setSemanticEnd(
+    target,
+    targetEnd === null || sourceEnd === null ? null : Math.max(targetEnd, sourceEnd),
+    sourceDefinesEnd ? semanticEndTimezoneOffset(source) : semanticEndTimezoneOffset(target),
+  );
   if (target.kind === "stay" && source.kind === "stay") {
     const targetStay = target.row as StayRow;
     const sourceStay = source.row as StayRow;
@@ -4367,7 +4510,6 @@ function mergeSemanticRows(
       targetStay.radius_m = sourceStay.radius_m;
       targetStay.type = sourceStay.type;
       targetStay.poi_id = sourceStay.poi_id;
-      targetStay.tz_offset_s = sourceStay.tz_offset_s;
       target.quality = source.quality;
     }
     context.removedStayIds.add(source.row.id);
@@ -4407,6 +4549,24 @@ function touchesOrOverlaps(lhs: SemanticRef, rhs: SemanticRef): boolean {
 
 function semanticEnd(ref: SemanticRef): number {
   return ref.row.end_ts ?? Number.POSITIVE_INFINITY;
+}
+
+function semanticStartTimezoneOffset(ref: SemanticRef): number | null {
+  return ref.row.tz_offset_s;
+}
+
+function semanticEndTimezoneOffset(ref: SemanticRef): number | null {
+  return ref.row.end_tz_offset_s;
+}
+
+function setSemanticStart(ref: SemanticRef, timestamp: number, timezoneOffset: number | null): void {
+  ref.row.start_ts = timestamp;
+  ref.row.tz_offset_s = timezoneOffset;
+}
+
+function setSemanticEnd(ref: SemanticRef, timestamp: number | null, timezoneOffset: number | null): void {
+  ref.row.end_ts = timestamp;
+  ref.row.end_tz_offset_s = timezoneOffset;
 }
 
 function hasPositiveDuration(ref: SemanticRef): boolean {
@@ -4640,6 +4800,8 @@ function insertGapsBetweenStays(state: MutableState): void {
       reason: "Unknown",
       uncertainty: null,
       notes: timelineNote.generatedBetweenStays,
+      tz_offset_s: previous.row.end_tz_offset_s,
+      end_tz_offset_s: current.row.tz_offset_s,
     };
     state.rows.no_data_gaps.push(row);
   }
@@ -4666,7 +4828,7 @@ function makeReport(
 
   return {
     sourceTypes,
-    userVersion: getLatestSchemaVersion(),
+    userVersion: schemaFile.version,
     fileCount,
     dateRange,
     counts,

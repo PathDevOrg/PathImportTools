@@ -1,5 +1,3 @@
-PRAGMA foreign_keys = ON;
-PRAGMA temp_store = MEMORY;
 CREATE TABLE devices (
   id          INTEGER PRIMARY KEY,
   platform    TEXT    NOT NULL,
@@ -224,7 +222,8 @@ CREATE TABLE stays (
   type                TEXT    CHECK (type IS NULL OR type IN ('anchor','venue','short')),
   poi_id              INTEGER REFERENCES pois(id) ON DELETE SET NULL ON UPDATE CASCADE,
   tz_offset_s         INTEGER CHECK (tz_offset_s IS NULL OR (tz_offset_s BETWEEN -50400 AND 50400))
-);
+, end_tz_offset_s INTEGER
+    CHECK (end_tz_offset_s IS NULL OR end_tz_offset_s BETWEEN -50400 AND 50400));
 CREATE INDEX idx_stays_start_ts ON stays(start_ts);
 CREATE TABLE moves (
   id                  INTEGER PRIMARY KEY,
@@ -234,7 +233,8 @@ CREATE TABLE moves (
   distance_m          REAL        CHECK (distance_m IS NULL OR distance_m >= 0),
   tz_offset_s         INTEGER     CHECK (tz_offset_s IS NULL OR (tz_offset_s BETWEEN -50400 AND 50400)),
   provider            TEXT
-);
+, end_tz_offset_s INTEGER
+    CHECK (end_tz_offset_s IS NULL OR end_tz_offset_s BETWEEN -50400 AND 50400));
 CREATE INDEX idx_moves_start_ts ON moves(start_ts);
 CREATE INDEX idx_moves_mode_ts ON moves(mode, start_ts);
 CREATE TABLE no_data_gaps (
@@ -244,7 +244,9 @@ CREATE TABLE no_data_gaps (
   reason       TEXT    NOT NULL CHECK (reason IN ('PermissionDenied','RadioOff','FlightSuspected','Underground','AppInactive','Unknown')),
   uncertainty  REAL        CHECK (uncertainty IS NULL OR uncertainty >= 0),
   notes        TEXT
-);
+, tz_offset_s INTEGER
+    CHECK (tz_offset_s IS NULL OR tz_offset_s BETWEEN -50400 AND 50400), end_tz_offset_s INTEGER
+    CHECK (end_tz_offset_s IS NULL OR end_tz_offset_s BETWEEN -50400 AND 50400));
 CREATE INDEX idx_gaps_start_ts ON no_data_gaps(start_ts);
 CREATE TABLE monitor_anchors (
   id               INTEGER PRIMARY KEY,
@@ -513,86 +515,18 @@ CREATE TRIGGER tle_sync_gap_del AFTER DELETE ON no_data_gaps
 BEGIN
   DELETE FROM timeline_events WHERE gap_id = OLD.id;
 END;
-CREATE VIEW timeline_enriched_events AS
-SELECT
-    te.id as event_id,
-    te.start_ts,
-    te.end_ts,
-    te.kind,
-    te.stay_id,
-    te.move_id,
-    -- Stay Context
-    s.type as stay_type,
-    s.centroid_lat,
-    s.centroid_lon,
-    s.radius_m,
-    s.poi_id,
-    -- POI Context
-    p.name as poi_name,
-    p.category as poi_category,
-    p.subcategory as poi_subcategory,
-    p.thoroughfare,
-    p.sub_thoroughfare,
-    p.locality,
-    p.sub_locality,
-    p.administrative_area,
-    p.postal_code,
-    p.country,
-    -- Move Context
-    m.mode as move_mode,
-    m.distance_m as move_distance_m,
-    -- Performance Optimization:
-    NULL as move_steps
-FROM timeline_events te
-LEFT JOIN stays s ON te.stay_id = s.id
-LEFT JOIN pois p ON s.poi_id = p.id
-LEFT JOIN moves m ON te.move_id = m.id;
 CREATE TABLE map_snapshots (
   id               INTEGER PRIMARY KEY,
   cache_key        TEXT NOT NULL UNIQUE, -- e.g. "move_123", "day_20231027", "month_202310"
   file_path        TEXT NOT NULL,        -- e.g. "Snapshots/month_202310.png"
+  data_version_tag TEXT,                 -- 用于检测数据源是否变更
+  width            INTEGER,              -- 图片宽度 (px)
+  height           INTEGER,              -- 图片高度 (px)
   theme            TEXT,                 -- e.g. "light", "dark"
   created_ts       REAL NOT NULL DEFAULT (unixepoch()),
   last_access_ts   REAL NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX idx_map_snapshots_key ON map_snapshots(cache_key);
-CREATE VIEW daily_pedometer_stats AS
-SELECT
-    DATE(ts + COALESCE(tz_offset_s, 0), 'unixepoch') as date,
-    SUM(CASE WHEN steps_delta > 0 THEN steps_delta ELSE 0 END) as total_steps,
-    SUM(CASE
-        WHEN steps_delta > 0
-             AND (CAST(distance_m AS REAL) / steps_delta) BETWEEN 0.3 AND 2.5
-        THEN distance_m
-        ELSE 0
-    END) as total_distance_m
-FROM raw_pedometer
-GROUP BY 1;
-CREATE VIEW hourly_pedometer_stats AS
-SELECT
-    DATE(ts + COALESCE(tz_offset_s, 0), 'unixepoch') as date,
-    STRFTIME('%H', ts + COALESCE(tz_offset_s, 0), 'unixepoch') as hour,
-    SUM(CASE WHEN steps_delta > 0 THEN steps_delta ELSE 0 END) as total_steps,
-    SUM(CASE
-        WHEN steps_delta > 0
-             AND (CAST(distance_m AS REAL) / steps_delta) BETWEEN 0.3 AND 2.5
-        THEN distance_m
-        ELSE 0
-    END) as total_distance_m
-FROM raw_pedometer
-GROUP BY 1, 2;
-CREATE VIEW monthly_pedometer_stats AS
-SELECT
-    STRFTIME('%Y-%m', ts + COALESCE(tz_offset_s, 0), 'unixepoch') as month,
-    SUM(CASE WHEN steps_delta > 0 THEN steps_delta ELSE 0 END) as total_steps,
-    SUM(CASE
-        WHEN steps_delta > 0
-             AND (CAST(distance_m AS REAL) / steps_delta) BETWEEN 0.3 AND 2.5
-        THEN distance_m
-        ELSE 0
-    END) as total_distance_m
-FROM raw_pedometer
-GROUP BY 1;
 CREATE VIEW daily_activity_stats AS
 SELECT
     DATE(start_ts + COALESCE(tz_offset_s, 0), 'unixepoch') as date,
@@ -955,4 +889,75 @@ WHEN EXISTS (
 BEGIN
   SELECT RAISE(ABORT, 'timeline_events: cannot delete to create adjacent events of same kind');
 END;
-PRAGMA user_version = 12;
+CREATE VIEW daily_pedometer_stats AS
+SELECT
+    DATE(ts + COALESCE(tz_offset_s, 0), 'unixepoch') as date,
+    SUM(CASE WHEN steps_delta > 0 THEN steps_delta ELSE 0 END) as total_steps,
+    SUM(CASE
+        WHEN steps_delta > 0
+             AND (CAST(distance_m AS REAL) / steps_delta) BETWEEN 0.3 AND 2.5
+        THEN distance_m
+        ELSE 0
+    END) as total_distance_m
+FROM raw_pedometer
+GROUP BY 1;
+CREATE VIEW hourly_pedometer_stats AS
+SELECT
+    DATE(ts + COALESCE(tz_offset_s, 0), 'unixepoch') as date,
+    STRFTIME('%H', ts + COALESCE(tz_offset_s, 0), 'unixepoch') as hour,
+    SUM(CASE WHEN steps_delta > 0 THEN steps_delta ELSE 0 END) as total_steps,
+    SUM(CASE
+        WHEN steps_delta > 0
+             AND (CAST(distance_m AS REAL) / steps_delta) BETWEEN 0.3 AND 2.5
+        THEN distance_m
+        ELSE 0
+    END) as total_distance_m
+FROM raw_pedometer
+GROUP BY 1, 2;
+CREATE VIEW monthly_pedometer_stats AS
+SELECT
+    STRFTIME('%Y-%m', ts + COALESCE(tz_offset_s, 0), 'unixepoch') as month,
+    SUM(CASE WHEN steps_delta > 0 THEN steps_delta ELSE 0 END) as total_steps,
+    SUM(CASE
+        WHEN steps_delta > 0
+             AND (CAST(distance_m AS REAL) / steps_delta) BETWEEN 0.3 AND 2.5
+        THEN distance_m
+        ELSE 0
+    END) as total_distance_m
+FROM raw_pedometer
+GROUP BY 1;
+CREATE VIEW timeline_enriched_events AS
+SELECT
+    te.id AS event_id,
+    te.start_ts,
+    te.end_ts,
+    te.kind,
+    te.stay_id,
+    te.move_id,
+    te.gap_id,
+    COALESCE(s.tz_offset_s, m.tz_offset_s, g.tz_offset_s) AS start_tz_offset_s,
+    COALESCE(s.end_tz_offset_s, m.end_tz_offset_s, g.end_tz_offset_s) AS end_tz_offset_s,
+    s.type AS stay_type,
+    s.centroid_lat,
+    s.centroid_lon,
+    s.radius_m,
+    s.poi_id,
+    p.name AS poi_name,
+    p.category AS poi_category,
+    p.subcategory AS poi_subcategory,
+    p.thoroughfare,
+    p.sub_thoroughfare,
+    p.locality,
+    p.sub_locality,
+    p.administrative_area,
+    p.postal_code,
+    p.country,
+    m.mode AS move_mode,
+    m.distance_m AS move_distance_m,
+    NULL AS move_steps
+FROM timeline_events te
+LEFT JOIN stays s ON te.stay_id = s.id
+LEFT JOIN pois p ON s.poi_id = p.id
+LEFT JOIN moves m ON te.move_id = m.id
+LEFT JOIN no_data_gaps g ON te.gap_id = g.id;
+PRAGMA user_version = 13;

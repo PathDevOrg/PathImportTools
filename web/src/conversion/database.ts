@@ -9,7 +9,7 @@ import {
 } from "@aura-importer/converter";
 import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
 import { acquireImporterStorageLease, cleanupStaleImporterStorage } from "./opfsCleanup";
-import { pathSchema } from "./schemaMigrations";
+import { pathSchema } from "./schema";
 
 type DatabaseProgress = {
   phase: "schema" | "write" | "verify" | "export";
@@ -121,11 +121,22 @@ const insertPlans = [
   },
   {
     table: "stays",
-    columns: ["id", "start_ts", "end_ts", "centroid_lat", "centroid_lon", "radius_m", "type", "poi_id", "tz_offset_s"],
+    columns: [
+      "id",
+      "start_ts",
+      "end_ts",
+      "centroid_lat",
+      "centroid_lon",
+      "radius_m",
+      "type",
+      "poi_id",
+      "tz_offset_s",
+      "end_tz_offset_s",
+    ],
   },
   {
     table: "moves",
-    columns: ["id", "start_ts", "end_ts", "mode", "distance_m", "tz_offset_s", "provider"],
+    columns: ["id", "start_ts", "end_ts", "mode", "distance_m", "tz_offset_s", "end_tz_offset_s", "provider"],
   },
   {
     table: "raw_gps",
@@ -203,7 +214,7 @@ const insertPlans = [
   },
   {
     table: "no_data_gaps",
-    columns: ["id", "start_ts", "end_ts", "reason", "uncertainty", "notes"],
+    columns: ["id", "start_ts", "end_ts", "reason", "uncertainty", "notes", "tz_offset_s", "end_tz_offset_s"],
   },
   {
     table: "route_paths",
@@ -343,7 +354,7 @@ export async function createAuraDatabaseWriter(
   };
 
   try {
-    onProgress({ phase: "schema", message: "Applying Path V12 schema", completed: 0, total: 1 });
+    onProgress({ phase: "schema", message: `Applying Path V${pathSchema.version} schema`, completed: 0, total: 1 });
     db.exec("PRAGMA journal_mode = DELETE");
     db.exec("PRAGMA foreign_keys = OFF");
     db.exec(pathSchema.sql);

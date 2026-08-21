@@ -3394,7 +3394,7 @@ describe("convertImportEntries", () => {
     expect(result.rows.raw_gps).toHaveLength(2);
     expect(result.rows.samples).toHaveLength(2);
     expect(result.report.sourceTypes).toEqual(["arc-export"]);
-    expect(result.report.userVersion).toBe(12);
+    expect(result.report.userVersion).toBe(13);
   });
 
   test("normalizes overlapping events and merges adjacent compatible events", async () => {

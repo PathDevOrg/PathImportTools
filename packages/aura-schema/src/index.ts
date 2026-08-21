@@ -3,8 +3,4 @@ export type AuraSchemaFile = {
   name: string;
 };
 
-export const schemaFile: AuraSchemaFile = { version: 12, name: "V12_schema.sql" };
-
-export function getLatestSchemaVersion(): number {
-  return schemaFile.version;
-}
+export const schemaFile: AuraSchemaFile = { version: 13, name: "V13_schema.sql" };

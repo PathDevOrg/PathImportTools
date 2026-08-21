@@ -80,6 +80,7 @@ export type StayRow = {
   type: "anchor" | "venue" | "short" | null;
   poi_id: number | null;
   tz_offset_s: number | null;
+  end_tz_offset_s: number | null;
 };
 
 export type MoveRow = {
@@ -89,6 +90,7 @@ export type MoveRow = {
   mode: MoveMode;
   distance_m: number | null;
   tz_offset_s: number | null;
+  end_tz_offset_s: number | null;
   provider: string | null;
 };
 
@@ -196,6 +198,8 @@ export type NoDataGapRow = {
   reason: "Unknown";
   uncertainty: number | null;
   notes: string | null;
+  tz_offset_s: number | null;
+  end_tz_offset_s: number | null;
 };
 
 export type AuraRows = {

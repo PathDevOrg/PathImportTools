@@ -26,8 +26,8 @@ describe("Aura database timeline verification", () => {
     });
     expect(verification.status, verification.stderr).toBe(0);
     expect(verification.stdout.trim().split("\n")).toEqual([
-      "12",
-      "0|12|Aura Importer V12_schema.sql",
+      "13",
+      "0|13|Aura Importer V13_schema.sql",
       "0"
     ]);
   });

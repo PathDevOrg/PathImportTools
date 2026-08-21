@@ -809,8 +809,13 @@ function stepRows<T>(
   onRow: (row: T) => void,
 ): void {
   const pointer = statementPointer(statement);
-  while (capi.sqlite3_step(pointer) === capi.SQLITE_ROW) {
+  let result = capi.sqlite3_step(pointer);
+  while (result === capi.SQLITE_ROW) {
     onRow(readRow(capi, pointer));
+    result = capi.sqlite3_step(pointer);
+  }
+  if (result !== capi.SQLITE_DONE) {
+    throw new Error(`SQLite row iteration failed: ${capi.sqlite3_errstr(result)} (${result})`);
   }
 }
 
