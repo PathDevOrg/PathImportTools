@@ -8,6 +8,7 @@ import {
   PrivacyFooter,
   WorkingState,
 } from "../components/ImportStages";
+import { LanguageSelector } from "../components/LanguageSelector";
 import { type DirectoryPickerHost, type PickedDirectoryFile, pickDirectoryFiles } from "../conversion/directoryPicker";
 import { makeImportFilename, makeUniqueImportFilename } from "../conversion/outputFilename";
 import { makeWorkerOutputTarget, type SaveFilePickerHost } from "../conversion/outputTarget";
@@ -19,6 +20,7 @@ import type {
   WorkerRequest,
   WorkerResponse,
 } from "../conversion/workerTypes";
+import { detectLocale, getTranslations, type LocaleCode } from "./i18n";
 import { type AppStage, pageTitle } from "./pageTitle";
 import { productCopy } from "./productCopy";
 
@@ -39,6 +41,19 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [errorTitle, setErrorTitle] = useState<string | null>(null);
   const [download, setDownload] = useState<DownloadState | null>(null);
+  const [locale, setLocale] = useState<LocaleCode>(() => detectLocale());
+  const [isDragging, setIsDragging] = useState(false);
+
+  const t = getTranslations(locale);
+
+  function changeLocale(next: LocaleCode) {
+    setLocale(next);
+    try {
+      localStorage.setItem("path_import_locale", next);
+    } catch {
+      void 0;
+    }
+  }
 
   useEffect(() => {
     const input = directoryInputRef.current;
@@ -88,6 +103,7 @@ export function App() {
             filename: response.filename,
             savedToDisk: response.savedToDisk,
             diagnostics: response.diagnostics,
+            stats: response.stats,
           });
           setStage("complete");
           setProgressDetail({
@@ -99,8 +115,8 @@ export function App() {
         } else if (response.type === "error") {
           void discardPendingOutputFile();
           setStage("error");
-          setErrorTitle(productCopy.errorUnknownTitle);
-          setError(response.message ?? "We could not finish the conversion. Choose another folder and try again.");
+          setErrorTitle(t.errorUnknownTitle);
+          setError(response.message);
           setProgressDetail(null);
         }
       };
@@ -148,7 +164,7 @@ export function App() {
         URL.revokeObjectURL(downloadUrlRef.current);
       }
     };
-  }, []);
+  }, [t.errorUnknownTitle]);
 
   useEffect(() => {
     document.title = pageTitle(stage, progressDetail);
@@ -171,8 +187,8 @@ export function App() {
   async function handleScanComplete(requestId: string, supportedFileCount: number) {
     if (supportedFileCount <= 0) {
       setStage("error");
-      setErrorTitle(null);
-      setError("We could not find data Path can convert in this folder.");
+      setErrorTitle(t.errorTitle);
+      setError(t.errorFallback);
       setProgressDetail(null);
       return;
     }
@@ -183,7 +199,7 @@ export function App() {
       const selectedOutput = outputDirectory
         ? await makeDirectoryOutputTarget(outputDirectory, outputFilename)
         : shouldAskForSaveLocationRef.current
-          ? await makeWorkerOutputTarget(window as SaveFilePickerHost, outputFilename)
+          ? await makeWorkerOutputTarget(window as unknown as SaveFilePickerHost, outputFilename)
           : { filename: outputFilename };
       const storage = (
         navigator as Navigator & {
@@ -208,34 +224,50 @@ export function App() {
         return;
       }
       sendToWorker("convert", filesRef.current, output);
-    } catch {
-      if (activeRequestRef.current !== requestId) {
+    } catch (error) {
+      if (requestId !== activeRequestRef.current) {
+        return;
+      }
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setStage("empty");
+        setProgressDetail(null);
+        setError(null);
+        setErrorTitle(null);
         return;
       }
       setStage("error");
-      setErrorTitle(productCopy.errorUnknownTitle);
-      setError("We could not open a place to save the import file.");
+      setErrorTitle(t.errorUnknownTitle);
+      setError(error instanceof Error ? error.message : String(error));
       setProgressDetail(null);
     }
   }
 
   async function selectBackupFolder() {
     try {
-      const selection = await pickDirectoryFiles(window as DirectoryPickerHost, makeImportFilename());
-      if (selection === null) {
+      const selected = await pickDirectoryFiles(window as unknown as DirectoryPickerHost, makeImportFilename());
+      if (selected === null) {
         directoryInputRef.current?.click();
         return;
       }
-      outputDirectoryRef.current = selection.directory;
-      outputFilenameRef.current = selection.filename;
+      outputDirectoryRef.current = selected.directory;
+      outputFilenameRef.current = selected.filename;
       shouldAskForSaveLocationRef.current = false;
-      selectPickedFiles(selection.files);
+      selectPickedFiles(selected.files);
     } catch {
-      setStage("error");
-      setErrorTitle(productCopy.errorUnknownTitle);
-      setError("We could not open this folder.");
-      setProgressDetail(null);
+      directoryInputRef.current?.click();
     }
+  }
+
+  function selectBackupZip() {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".zip,application/zip";
+    input.onchange = () => {
+      if (input.files) {
+        selectInputFiles(input.files);
+      }
+    };
+    input.click();
   }
 
   function selectInputFiles(list: FileList | null) {
@@ -281,7 +313,7 @@ export function App() {
 
   function cancelActiveTask() {
     const activeRequestId = activeRequestRef.current;
-    if (!activeRequestId || !window.confirm(productCopy.cancelConfirm)) {
+    if (!activeRequestId || !window.confirm(t.cancelConfirm)) {
       return;
     }
     workerRef.current?.postMessage({
@@ -329,41 +361,93 @@ export function App() {
     worker.postMessage(request);
   }
 
+  function handleDragOver(e: React.DragEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  }
+
+  function handleDragLeave(e: React.DragEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+      setIsDragging(false);
+    }
+  }
+
+  async function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    try {
+      const dropped = await extractDroppedFiles(e.dataTransfer);
+      if (dropped.length > 0) {
+        outputDirectoryRef.current = null;
+        outputFilenameRef.current = null;
+        shouldAskForSaveLocationRef.current = true;
+        selectPickedFiles(dropped);
+      }
+    } catch {
+      selectInputFiles(e.dataTransfer.files);
+    }
+  }
+
   const percent = progressPercent(stage, progressDetail);
 
   return (
     <main className="app-shell">
-      <nav className="topbar" aria-label={productCopy.appName}>
-        <a className="brand-lockup" href="/" aria-label={productCopy.navHomeLabel}>
+      <nav className="topbar" aria-label={t.appName}>
+        <a className="brand-lockup" href="/" aria-label={t.navHomeLabel}>
           <img src="/path-logo.png" alt="" />
-          <strong>{productCopy.appName}</strong>
+          <strong>{t.appName}</strong>
         </a>
-        <a
-          className="github-badge"
-          href={productCopy.githubRepoHref}
-          target="_blank"
-          rel="noreferrer"
-          aria-label={productCopy.githubRepoLabel}
-        >
-          <Github size={19} aria-hidden="true" />
-          <span>GitHub</span>
-        </a>
+        <div className="topbar-actions">
+          <LanguageSelector currentLocale={locale} onSelect={changeLocale} />
+          <a
+            className="github-badge"
+            href={productCopy.githubRepoHref}
+            target="_blank"
+            rel="noreferrer"
+            aria-label={t.githubRepoLabel}
+          >
+            <Github size={19} aria-hidden="true" />
+            <span>GitHub</span>
+          </a>
+        </div>
       </nav>
 
-      <section className="import-shell" aria-labelledby="import-title">
-        <h1 id="import-title">{productCopy.heroTitle}</h1>
-        <p className="hero-copy">{productCopy.heroBody}</p>
+      <section
+        className={`import-shell ${isDragging ? "is-drag-active" : ""}`}
+        aria-labelledby="import-title"
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        <h1 id="import-title">{t.heroTitle}</h1>
+        <p className="hero-copy">{t.heroBody}</p>
 
         <section className="workflow-surface" aria-live="polite">
-          {stage === "empty" ? <EmptyState onSelect={() => void selectBackupFolder()} /> : null}
+          {stage === "empty" ? (
+            <EmptyState
+              t={t}
+              onSelectFolder={() => void selectBackupFolder()}
+              onSelectZip={() => selectBackupZip()}
+              isDragging={isDragging}
+            />
+          ) : null}
           {stage === "scanning" || stage === "converting" ? (
-            <WorkingState percent={percent} progress={progressDetail} onCancel={() => void cancelActiveTask()} />
+            <WorkingState percent={percent} progress={progressDetail} onCancel={() => void cancelActiveTask()} t={t} />
           ) : null}
           {stage === "complete" && download ? (
-            <CompleteState download={download} onSelect={() => void selectBackupFolder()} />
+            <CompleteState download={download} onSelect={() => void selectBackupFolder()} t={t} locale={locale} />
           ) : null}
           {stage === "error" ? (
-            <ErrorState message={error} title={errorTitle ?? undefined} onSelect={() => void selectBackupFolder()} />
+            <ErrorState
+              message={error}
+              title={errorTitle ?? undefined}
+              onSelect={() => void selectBackupFolder()}
+              t={t}
+            />
           ) : null}
         </section>
 
@@ -379,9 +463,59 @@ export function App() {
         />
       </section>
 
-      <PrivacyFooter />
+      <PrivacyFooter t={t} />
     </main>
   );
+}
+
+async function extractDroppedFiles(dataTransfer: DataTransfer): Promise<PickedDirectoryFile[]> {
+  const files: PickedDirectoryFile[] = [];
+  const items = dataTransfer.items;
+
+  if (!items || items.length === 0) {
+    return Array.from(dataTransfer.files || []).map((file) => ({
+      file,
+      path: file.name,
+    }));
+  }
+
+  const entries: FileSystemEntry[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.webkitGetAsEntry) {
+      const entry = item.webkitGetAsEntry();
+      if (entry) entries.push(entry);
+    } else if (item.kind === "file") {
+      const file = item.getAsFile();
+      if (file) files.push({ file, path: file.name });
+    }
+  }
+
+  async function readEntry(entry: FileSystemEntry, path: string) {
+    if (entry.isFile) {
+      const fileEntry = entry as FileSystemFileEntry;
+      const file = await new Promise<File>((resolve, reject) => fileEntry.file(resolve, reject));
+      files.push({ file, path: path ? `${path}/${entry.name}` : entry.name });
+    } else if (entry.isDirectory) {
+      const dirEntry = entry as FileSystemDirectoryEntry;
+      const dirReader = dirEntry.createReader();
+      const readBatch = async (): Promise<FileSystemEntry[]> => {
+        return new Promise((resolve, reject) => dirReader.readEntries(resolve, reject));
+      };
+      let batch: FileSystemEntry[];
+      do {
+        batch = await readBatch();
+        for (const child of batch) {
+          await readEntry(child, path ? `${path}/${entry.name}` : entry.name);
+        }
+      } while (batch.length > 0);
+    }
+  }
+
+  for (const entry of entries) {
+    await readEntry(entry, "");
+  }
+  return files;
 }
 
 async function makeDirectoryOutputTarget(

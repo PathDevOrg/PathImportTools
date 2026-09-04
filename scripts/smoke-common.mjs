@@ -40,7 +40,7 @@ export async function withPreview(port, run) {
 
 export async function openPage() {
   const browser = await chromium.launch();
-  const page = await browser.newPage({ viewport: { width: 1360, height: 808 }, deviceScaleFactor: 1 });
+  const page = await browser.newPage({ viewport: { width: 1360, height: 808 }, deviceScaleFactor: 1, locale: "en-US" });
   const errors = [];
   const consoleLog = [];
   page.on("console", (message) => {

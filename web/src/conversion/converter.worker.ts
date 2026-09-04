@@ -115,6 +115,13 @@ async function handleRequest(request: WorkerRequest): Promise<void> {
       filename: output.filename,
       savedToDisk: output.savedToDisk,
       diagnostics: result.report.diagnostics,
+      stats: {
+        dateRange: result.report.dateRange,
+        fileCount: result.report.fileCount,
+        stays: result.report.counts.stays,
+        moves: result.report.counts.moves,
+        pois: result.report.counts.pois,
+      },
       bytes: output.bytes,
       file: output.file,
       outputToken,

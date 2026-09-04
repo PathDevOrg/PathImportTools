@@ -41,6 +41,14 @@ export type WorkerProgress = {
   total: number;
 };
 
+export type ConversionStats = {
+  dateRange: { startTs: number; endTs: number } | null;
+  fileCount: number;
+  stays: number;
+  moves: number;
+  pois: number;
+};
+
 export type WorkerResponse =
   | {
       id: string;
@@ -59,6 +67,7 @@ export type WorkerResponse =
       filename: string;
       savedToDisk: boolean;
       diagnostics: string[];
+      stats?: ConversionStats;
       bytes?: Uint8Array;
       file?: File;
       outputToken?: string;
