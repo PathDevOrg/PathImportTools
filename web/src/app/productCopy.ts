@@ -15,9 +15,9 @@ export const productCopy = {
   completeStep: "Step 3 of 3",
   completeTitle: "Import file ready",
   completeSavedBody:
-    "Your import database was saved in the selected folder. Open Path on your iPhone and import it from Settings.",
+    "Your import database was saved in the selected folder. Open Path on your iPhone, then go to Settings → Data Management → Import Data.",
   completeDownloadBody:
-    "Your import database downloaded automatically. Open Path on your iPhone and import it from Settings.",
+    "Your import database downloaded automatically. Open Path on your iPhone, then go to Settings → Data Management → Import Data.",
   savedStatus: "Saved to disk",
   downloadAgainLabel: "Download again",
   chooseAnotherLabel: "Choose another folder",

@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://import.path.autheai.com/sitemap.xml
+
+# Machine-readable product context for AI search agents and answer engines:
+# https://import.path.autheai.com/llms.txt

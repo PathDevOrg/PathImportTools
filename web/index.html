@@ -2,14 +2,191 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Path Import — Convert Arc &amp; Moves Backups Locally | Private GPS Timeline Migration</title>
+    <meta
+      name="description"
+      content="Free, 100% private client-side converter for Arc App and Moves backups. Transform your historical timeline, stays, trips, and places into a local SQLite database for Path on iOS without uploading any data to external servers."
+    />
+    <meta
+      name="keywords"
+      content="Path Import, Arc App export, Arc App backup, Moves export, Moves storyline JSON, convert Arc to SQLite, migrate Arc to Path, private location history converter, GPS timeline migration, client-side WebAssembly SQLite"
+    />
+    <link rel="canonical" href="https://import.path.autheai.com/" />
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
     <meta name="theme-color" content="#f7f8f4" />
+
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Path Import" />
+    <meta name="format-detection" content="telephone=no" />
+
+    <!-- Open Graph / Facebook -->
+    <meta property="og:site_name" content="Path Import" />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:title" content="Path Import — Convert Arc &amp; Moves Backups Locally" />
+    <meta
+      property="og:description"
+      content="100% private, client-side WebAssembly tool to migrate and convert your Arc App and Moves location history into Path on iOS. Zero server uploads."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://import.path.autheai.com/" />
+    <meta property="og:image" content="https://import.path.autheai.com/og-cover.jpg" />
+    <meta property="og:image:type" content="image/jpeg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Path Import: Convert Arc and Moves backups locally" />
+
+    <!-- Twitter / X -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Path Import — Convert Arc &amp; Moves Backups Locally" />
+    <meta
+      name="twitter:description"
+      content="100% private, client-side WebAssembly tool to migrate your Arc App and Moves timeline data into Path on iOS."
+    />
+    <meta name="twitter:image" content="https://import.path.autheai.com/og-cover.jpg" />
+    <meta name="twitter:image:alt" content="Path Import: Convert Arc and Moves backups locally" />
+
     <link rel="icon" href="/favicon.ico" sizes="any" />
     <link rel="icon" type="image/png" href="/favicon.png" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <title>Path Import</title>
+
+    <!-- Structured Data for Search & AI Answer Engines (AGO / GEO) -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "WebSite",
+          "@id": "https://import.path.autheai.com/#website",
+          "url": "https://import.path.autheai.com/",
+          "name": "Path Import",
+          "description": "Convert Arc and Moves backups locally into an SQLite database for Path on iOS.",
+          "publisher": {
+            "@id": "https://path.autheai.com/#organization"
+          }
+        },
+        {
+          "@type": "Organization",
+          "@id": "https://path.autheai.com/#organization",
+          "name": "Path",
+          "url": "https://path.autheai.com/",
+          "logo": {
+            "@type": "ImageObject",
+            "url": "https://path.autheai.com/path-logo.png"
+          }
+        },
+        {
+          "@type": "WebApplication",
+          "@id": "https://import.path.autheai.com/#app",
+          "name": "Path Import",
+          "url": "https://import.path.autheai.com/",
+          "applicationCategory": "UtilitiesApplication",
+          "operatingSystem": "All modern browsers with WebAssembly support",
+          "isAccessibleForFree": true,
+          "offers": {
+            "@type": "Offer",
+            "price": "0",
+            "priceCurrency": "USD"
+          },
+          "publisher": {
+            "@id": "https://path.autheai.com/#organization"
+          },
+          "featureList": [
+            "100% private client-side WebAssembly SQLite conversion",
+            "Zero network uploads, zero telemetry, full offline operation",
+            "Direct migration for Arc App JSON and GPX export archives",
+            "Direct migration for Moves App daily storyline JSON archives",
+            "Generates optimized SQLite database for Path on iOS"
+          ],
+          "description": "Path Import is a 100% private, client-side WebAssembly tool to migrate and convert historical location history archives from Arc App and Moves App into an on-device SQLite database for Path on iOS."
+        },
+        {
+          "@type": "HowTo",
+          "@id": "https://import.path.autheai.com/#howto",
+          "name": "How to convert Arc and Moves backups into Path",
+          "step": [
+            {
+              "@type": "HowToStep",
+              "name": "Select Backup Folder",
+              "text": "Select your unzipped backup folder containing Arc Export, Arc Previous Backups, or Moves storyline JSON."
+            },
+            {
+              "@type": "HowToStep",
+              "name": "Local WebAssembly Conversion",
+              "text": "Path Import reads and normalizes your timeline records entirely within your browser using SQLite WebAssembly."
+            },
+            {
+              "@type": "HowToStep",
+              "name": "Import into Path on iPhone",
+              "text": "Transfer the generated .db file to your iPhone and import it from Path Settings → Data Management → Import Data."
+            }
+          ]
+        },
+        {
+          "@type": "FAQPage",
+          "@id": "https://import.path.autheai.com/#faq",
+          "mainEntity": [
+            {
+              "@type": "Question",
+              "name": "Does Path Import upload my location data to any server?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "No. Path Import operates entirely on-device within your browser using WebAssembly and the Origin Private File System (OPFS). No files, coordinates, or data ever leave your machine."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "What backup formats does Path Import support?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Path Import supports Arc App exports (including Arc Export and Arc Previous Backups folders) and Moves App daily storyline JSON archives (such as json/daily/storyline)."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Can I run Path Import completely offline?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Yes. Once the web application and SQLite WebAssembly runtime are loaded, you can disconnect from the internet and convert your backups completely offline."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "How do I import the converted database into Path on iPhone?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Transfer the generated .db file to your iPhone using AirDrop, iCloud Drive, or the Files app. Then open Path on your iPhone, navigate to Settings → Data Management → Import Data, and select the file."
+              }
+            }
+          ]
+        }
+      ]
+    }
+    </script>
   </head>
   <body>
+    <noscript>
+      <div style="max-width: 640px; margin: 40px auto; padding: 24px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #1e293b;">
+        <h1>Path Import — Convert Arc &amp; Moves Backups Locally</h1>
+        <p>Path Import is a free, 100% private, client-side WebAssembly tool that converts historical location history archives from Arc App and Moves into an on-device SQLite database for Path on iOS.</p>
+        <h2>Privacy Guarantee</h2>
+        <p>Everything is read, parsed, and converted entirely on your local machine using SQLite WebAssembly. Zero data is uploaded to any server. Once the page is loaded, you can disconnect from the internet and run the tool offline.</p>
+        <h2>Supported Formats</h2>
+        <ul>
+          <li><strong>Arc App:</strong> Unzipped folders containing Arc Export, Arc Previous Backups, daily JSON, and GPX tracks.</li>
+          <li><strong>Moves App:</strong> Unzipped folders containing json/daily/storyline or daily storyline JSON archives.</li>
+        </ul>
+        <h2>How to Import</h2>
+        <ol>
+          <li>Select your unzipped Arc or Moves backup folder.</li>
+          <li>Wait for Path Import to build your SQLite database file locally.</li>
+          <li>Transfer the resulting <code>.db</code> file to your iPhone (via AirDrop, iCloud Drive, or Files app).</li>
+          <li>Open Path on iPhone, go to Settings &gt; Data Management &gt; Import Data, and select the file.</li>
+        </ol>
+        <p><a href="https://path.autheai.com/">Visit Path Official Website</a> | <a href="https://github.com/PathDevOrg/PathImportTools">View on GitHub</a></p>
+      </div>
+    </noscript>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

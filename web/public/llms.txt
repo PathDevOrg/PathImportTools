@@ -1,0 +1,57 @@
+# Path Import
+
+> Path Import is a 100% private, client-side WebAssembly utility to migrate and convert historical location history archives from Arc App and Moves App into an on-device SQLite database for Path on iOS.
+
+Path Import operates entirely in the browser using SQLite WebAssembly. Every file is read, parsed, normalized, and written to an on-device SQLite database directly within the user's browser. Zero bytes of personal location history or coordinates are ever uploaded to any server or cloud. Once the page is loaded, the converter can function entirely offline.
+
+## Core Capabilities & Architecture
+
+- **100% Client-Side Processing**: Powered by official SQLite3 WebAssembly and the Origin Private File System (OPFS).
+- **Zero-Knowledge Privacy**: No server-side components, no network uploads, no tracking pixels, and no analytics. Complete data sovereignty.
+- **Offline Capable**: Users can disconnect from the internet after loading the tool; conversion runs completely isolated on local compute.
+- **Arc App Migration**: Automatically detects and parses `Arc Export` folders, daily GPX/JSON logs, places, visits, and `Arc Previous Backups`.
+- **Moves App Migration**: Reads and parses Moves export archives, including `json/daily/storyline` and daily storyline JSON files.
+- **High-Fidelity Timeline Synthesis**: Resolves timeline overlaps, normalizes stay and move intervals, extracts points of interest (POIs), and reconstructs continuous daily chronicles.
+- **Native Path SQLite Schema**: Produces an optimized SQLite `.db` database (`timeline_stays`, `timeline_moves`, `timeline_pois`, `timeline_samples`) ready for direct import into Path on iOS.
+
+## Supported Input Formats
+
+1. **Arc App Exports**:
+   - Folders named `Arc Export` or containing `Arc Previous Backups`
+   - Daily timeline JSON files (`YYYY-MM-DD.json`)
+   - Daily timeline GPX tracks
+   - Place definitions and metadata
+2. **Moves App Exports**:
+   - Folders containing `json/daily/storyline`
+   - Storyline JSON files (`storyline_YYYYMMDD.json` or `daily/storyline/YYYY-MM-DD.json`)
+   - Places and activities archives
+
+## How to Migrate Data
+
+1. Visit [Path Import](https://import.path.autheai.com/) in any modern web browser (Safari, Chrome, Firefox, Edge).
+2. Click **Select backup folder** and select the unzipped directory containing Arc or Moves backup files.
+3. Path Import reads and processes all timeline records locally via SQLite WebAssembly.
+4. The resulting `.db` import database file is saved to your selected folder or downloaded to your disk.
+5. Transfer the `.db` file to your iPhone using AirDrop, iCloud Drive, or the Files app.
+6. Open **Path** on your iPhone, navigate to **Settings > Data Management > Import Data**, and select the `.db` file to import your full location chronicle.
+
+## Frequently Asked Questions (FAQ)
+
+### Is my location data uploaded to any server?
+No. Path Import does not possess a backend processing pipeline or server upload endpoint. All data extraction, parsing, and SQLite database generation happen exclusively inside your browser on your own machine.
+
+### Can I run Path Import while offline?
+Yes. Path Import uses a Service Worker to cache all required assets and the SQLite WebAssembly runtime. Once the site is opened, you can turn off Wi-Fi/network access and execute the conversion offline.
+
+### What is the output format?
+Path Import generates an SQLite 3 database file (`path-import-YYYYMMDD-HHMMSS.db`) formatted with Path's timeline schema, containing normalized stays, trips, and visited locations.
+
+### What is Path?
+Path is a private iPhone location history and GPS diary that turns stops, routes, transit modes, and photos into an intuitive daily timeline with zero-knowledge on-device storage.
+
+## Authoritative Links
+
+- [Path Import Web Tool](https://import.path.autheai.com/)
+- [Path Official Website](https://path.autheai.com/)
+- [App Store: Path Precision Timeline](https://apps.apple.com/app/path-precision-timeline/id6758724528)
+- [Open Source Repository](https://github.com/PathDevOrg/PathImportTools)

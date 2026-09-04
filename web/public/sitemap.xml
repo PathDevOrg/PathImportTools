@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
+  <url>
+    <loc>https://import.path.autheai.com/</loc>
+    <lastmod>2026-09-04</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+    <image:image>
+      <image:loc>https://import.path.autheai.com/og-cover.jpg</image:loc>
+      <image:title>Path Import: Convert Arc and Moves backups locally</image:title>
+      <image:caption>100% private, client-side WebAssembly converter for Arc and Moves timeline backups</image:caption>
+    </image:image>
+    <image:image>
+      <image:loc>https://import.path.autheai.com/path-logo.png</image:loc>
+      <image:title>Path Logo</image:title>
+      <image:caption>Path logo</image:caption>
+    </image:image>
+  </url>
+</urlset>

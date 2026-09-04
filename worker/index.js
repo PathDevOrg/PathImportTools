@@ -14,8 +14,13 @@ export default {
     for (const [name, value] of Object.entries(headers)) {
       nextHeaders.set(name, value);
     }
-    if (new URL(request.url).pathname.endsWith(".wasm")) {
+    const pathname = new URL(request.url).pathname;
+    if (pathname.endsWith(".wasm")) {
       nextHeaders.set("Content-Type", "application/wasm");
+    } else if (pathname.endsWith(".txt")) {
+      nextHeaders.set("Content-Type", "text/plain; charset=utf-8");
+    } else if (pathname.endsWith(".xml")) {
+      nextHeaders.set("Content-Type", "application/xml; charset=utf-8");
     }
     return new Response(response.body, {
       status: response.status,

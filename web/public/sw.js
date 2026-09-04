@@ -8,8 +8,12 @@ const precacheBasePaths = [
   "/favicon.png",
   "/apple-touch-icon.png",
   "/path-logo.png",
+  "/og-cover.jpg",
   "/download-on-the-app-store.svg",
   "/sqlite3.wasm",
+  "/robots.txt",
+  "/sitemap.xml",
+  "/llms.txt",
 ];
 
 self.addEventListener("install", (event) => {
@@ -134,6 +138,10 @@ function isCacheablePath(pathname) {
     "/favicon.png",
     "/apple-touch-icon.png",
     "/path-logo.png",
+    "/og-cover.jpg",
     "/download-on-the-app-store.svg",
+    "/robots.txt",
+    "/sitemap.xml",
+    "/llms.txt",
   ].includes(pathname);
 }

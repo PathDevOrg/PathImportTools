@@ -73,9 +73,9 @@ const enTranslations: TranslationStrings = {
   statsMoves: "trips",
   statsPois: "places",
   handoffTitle: "How to import into Path on iPhone",
-  handoffStep1: "Transfer the .sqlite file to your iPhone via AirDrop or iCloud Drive.",
-  handoffStep2: "Open Path on your iPhone, then go to Settings → Data & Storage.",
-  handoffStep3: 'Tap "Import from SQLite" and select this file.',
+  handoffStep1: "Transfer the .db file to your iPhone via AirDrop or iCloud Drive.",
+  handoffStep2: "Open Path on your iPhone, then go to Settings → Data Management → Import Data.",
+  handoffStep3: "Select the database file to start importing your timeline.",
 };
 
 const zhHansTranslations: TranslationStrings = {
@@ -96,8 +96,8 @@ const zhHansTranslations: TranslationStrings = {
   cancelConfirm: "确定要取消本次转换吗？所有已处理进度将被丢弃。",
   completeStep: "第 3 步，共 3 步",
   completeTitle: "导入文件已准备就绪",
-  completeSavedBody: "导入数据库已保存在所选文件夹中。在 iPhone 上打开 Path 并通过【设置】导入。",
-  completeDownloadBody: "导入数据库已自动下载。在 iPhone 上打开 Path 并通过【设置】导入。",
+  completeSavedBody: "导入数据库已保存在所选文件夹中。在 iPhone 上打开 Path，进入【设置】→【数据管理】→【导入数据】。",
+  completeDownloadBody: "导入数据库已自动下载。在 iPhone 上打开 Path，进入【设置】→【数据管理】→【导入数据】。",
   savedStatus: "已保存至磁盘",
   downloadAgainLabel: "再次下载",
   chooseAnotherLabel: "选择其他备份",
@@ -112,9 +112,9 @@ const zhHansTranslations: TranslationStrings = {
   statsMoves: "段行程",
   statsPois: "个地点",
   handoffTitle: "如何导入至 iPhone 上的 Path",
-  handoffStep1: "通过隔空投送（AirDrop）或存储至 iCloud 云盘将 .sqlite 文件发送至 iPhone。",
-  handoffStep2: "在 iPhone 上打开 Path，进入【设置】→【数据与存储】。",
-  handoffStep3: "点击【从 SQLite 备份导入】并选取该文件。",
+  handoffStep1: "通过隔空投送（AirDrop）或存储至 iCloud 云盘将 .db 文件发送至 iPhone。",
+  handoffStep2: "在 iPhone 上打开 Path，进入【设置】→【数据管理】→【导入数据】。",
+  handoffStep3: "选取该数据库文件，即可开始导入你的历史数据。",
 };
 
 const zhHantTranslations: TranslationStrings = {
@@ -135,8 +135,9 @@ const zhHantTranslations: TranslationStrings = {
   cancelConfirm: "確定要取消本次轉換嗎？所有已處理進度將被放棄。",
   completeStep: "第 3 步，共 3 步",
   completeTitle: "匯入檔案已準備就緒",
-  completeSavedBody: "匯入資料庫已直接儲存在所選資料夾中。在 iPhone 上打開 Path 並透過【設定】匯入。",
-  completeDownloadBody: "匯入資料庫已自動下載。在 iPhone 上打開 Path 並透過【設定】匯入。",
+  completeSavedBody:
+    "匯入資料庫已直接儲存在所選資料夾中。在 iPhone 上打開 Path，前往【設定】→【資料管理】→【匯入資料】。",
+  completeDownloadBody: "匯入資料庫已自動下載。在 iPhone 上打開 Path，前往【設定】→【資料管理】→【匯入資料】。",
   savedStatus: "已儲存至磁碟",
   downloadAgainLabel: "再次下載",
   chooseAnotherLabel: "選取其他備份",
@@ -151,9 +152,9 @@ const zhHantTranslations: TranslationStrings = {
   statsMoves: "段行程",
   statsPois: "個地點",
   handoffTitle: "如何匯入至 iPhone 上的 Path",
-  handoffStep1: "透過隔空投送（AirDrop）或儲存至 iCloud 雲碟將 .sqlite 檔案傳送至 iPhone。",
-  handoffStep2: "在 iPhone 上開啟 Path，進入【設定】→【資料與儲存空間】。",
-  handoffStep3: "點選【從 SQLite 備份匯入】並選取該檔案。",
+  handoffStep1: "透過隔空投送（AirDrop）或儲存至 iCloud 雲碟將 .db 檔案傳送至 iPhone。",
+  handoffStep2: "在 iPhone 上開啟 Path，進入【設定】→【資料管理】→【匯入資料】。",
+  handoffStep3: "選取該資料庫檔案，即可開始匯入你的歷史資料。",
 };
 
 const jaTranslations: TranslationStrings = {
@@ -175,9 +176,9 @@ const jaTranslations: TranslationStrings = {
   completeStep: "ステップ 3 / 3",
   completeTitle: "インポートファイルの準備が完了しました",
   completeSavedBody:
-    "変換されたデータベースを選択したフォルダに保存しました。iPhoneのPathの「設定」からインポートしてください。",
+    "変換されたデータベースを選択したフォルダに保存しました。iPhoneでPathを開き、【設定】→【データ管理】→【データを読み込む】からインポートしてください。",
   completeDownloadBody:
-    "データベースが自動的にダウンロードされました。iPhoneのPathの「設定」からインポートしてください。",
+    "データベースが自動的にダウンロードされました。iPhoneでPathを開き、【設定】→【データ管理】→【データを読み込む】からインポートしてください。",
   savedStatus: "ディスクに保存完了",
   downloadAgainLabel: "もう一度ダウンロード",
   chooseAnotherLabel: "別のバックアップを選択",
@@ -192,9 +193,9 @@ const jaTranslations: TranslationStrings = {
   statsMoves: "回の移動",
   statsPois: "箇所のスポット",
   handoffTitle: "iPhoneのPathへインポートする手順",
-  handoffStep1: ".sqliteファイルをAirDropまたはiCloud DriveでiPhoneに転送します。",
-  handoffStep2: "iPhoneでPathを開き、「設定」→「データとストレージ」へ進みます。",
-  handoffStep3: "「SQLiteからインポート」をタップして本ファイルを選択します。",
+  handoffStep1: ".dbファイルをAirDropまたはiCloud DriveでiPhoneに転送します。",
+  handoffStep2: "iPhoneでPathを開き、【設定】→【データ管理】→【データを読み込む】へ進みます。",
+  handoffStep3: "該当のデータベースファイルを選択して、データのインポートを開始します。",
 };
 
 const koTranslations: TranslationStrings = {
@@ -215,8 +216,10 @@ const koTranslations: TranslationStrings = {
   cancelConfirm: "변환을 취소하시겠습니까? 진행 상황이 삭제됩니다.",
   completeStep: "3단계 중 3단계",
   completeTitle: "가져오기 파일 준비 완료",
-  completeSavedBody: "변환된 데이터베이스가 선택한 폴더에 저장되었습니다. iPhone의 Path 앱 설정에서 가져오세요.",
-  completeDownloadBody: "변환된 데이터베이스가 자동으로 다운로드되었습니다. iPhone의 Path 앱 설정에서 가져오세요.",
+  completeSavedBody:
+    "변환된 데이터베이스가 선택한 폴더에 저장되었습니다. iPhone에서 Path 앱을 열고 [설정] → [데이터 관리] → [데이터 가져오기]로 이동하세요.",
+  completeDownloadBody:
+    "변환된 데이터베이스가 자동으로 다운로드되었습니다. iPhone에서 Path 앱을 열고 [설정] → [데이터 관리] → [데이터 가져오기]로 이동하세요.",
   savedStatus: "디스크에 저장됨",
   downloadAgainLabel: "다시 다운로드",
   chooseAnotherLabel: "다른 백업 선택",
@@ -231,9 +234,9 @@ const koTranslations: TranslationStrings = {
   statsMoves: "개 이동",
   statsPois: "개 장소",
   handoffTitle: "iPhone Path 앱으로 가져오는 방법",
-  handoffStep1: "AirDrop 또는 iCloud Drive를 통해 .sqlite 파일을 iPhone으로 전송합니다.",
-  handoffStep2: "iPhone에서 Path 앱을 열고 [설정] → [데이터 및 저장 공간]으로 이동합니다.",
-  handoffStep3: "[SQLite 백업에서 가져오기]를 탭하고 이 파일을 선택합니다.",
+  handoffStep1: "AirDrop 또는 iCloud Drive를 통해 .db 파일을 iPhone으로 전송합니다.",
+  handoffStep2: "iPhone에서 Path 앱을 열고 [설정] → [데이터 관리] → [데이터 가져오기]로 이동합니다.",
+  handoffStep3: "해당 데이터베이스 파일을 선택하여 데이터 가져오기를 시작합니다.",
 };
 
 const deTranslations: TranslationStrings = {
@@ -255,9 +258,9 @@ const deTranslations: TranslationStrings = {
   completeStep: "Schritt 3 von 3",
   completeTitle: "Import-Datei bereit",
   completeSavedBody:
-    "Ihre Datenbank wurde im ausgewählten Ordner gespeichert. Öffnen Sie Path auf dem iPhone zum Importieren.",
+    "Ihre Datenbank wurde im ausgewählten Ordner gespeichert. Öffnen Sie Path auf dem iPhone und gehen Sie zu Einstellungen → Datenverwaltung → Daten importieren.",
   completeDownloadBody:
-    "Ihre Datenbank wurde automatisch heruntergeladen. Öffnen Sie Path auf dem iPhone zum Importieren.",
+    "Ihre Datenbank wurde automatisch heruntergeladen. Öffnen Sie Path auf dem iPhone und gehen Sie zu Einstellungen → Datenverwaltung → Daten importieren.",
   savedStatus: "Auf Festplatte gespeichert",
   downloadAgainLabel: "Erneut herunterladen",
   chooseAnotherLabel: "Anderes Backup wählen",
@@ -272,9 +275,9 @@ const deTranslations: TranslationStrings = {
   statsMoves: "Fahrten & Wege",
   statsPois: "Orte",
   handoffTitle: "So importieren Sie in Path auf dem iPhone",
-  handoffStep1: "Übertragen Sie die .sqlite-Datei via AirDrop oder iCloud Drive auf Ihr iPhone.",
-  handoffStep2: "Öffnen Sie Path auf dem iPhone und gehen Sie zu Einstellungen → Daten & Speicher.",
-  handoffStep3: "Tippen Sie auf „Aus SQLite-Backup importieren“ und wählen Sie diese Datei.",
+  handoffStep1: "Übertragen Sie die .db-Datei via AirDrop oder iCloud Drive auf Ihr iPhone.",
+  handoffStep2: "Öffnen Sie Path auf dem iPhone und gehen Sie zu Einstellungen → Datenverwaltung → Daten importieren.",
+  handoffStep3: "Wählen Sie die Datenbankdatei aus, um den Datenimport zu starten.",
 };
 
 const frTranslations: TranslationStrings = {
@@ -296,9 +299,9 @@ const frTranslations: TranslationStrings = {
   completeStep: "Étape 3 sur 3",
   completeTitle: "Fichier d'import prêt",
   completeSavedBody:
-    "Votre base de données a été enregistrée dans le dossier choisi. Ouvrez Path sur iPhone pour l'importer.",
+    "Votre base de données a été enregistrée dans le dossier choisi. Ouvrez Path sur iPhone et accédez à Réglages → Gestion des données → Importer des données.",
   completeDownloadBody:
-    "Votre base de données a été téléchargée automatiquement. Ouvrez Path sur iPhone pour l'importer.",
+    "Votre base de données a été téléchargée automatiquement. Ouvrez Path sur iPhone et accédez à Réglages → Gestion des données → Importer des données.",
   savedStatus: "Enregistré sur le disque",
   downloadAgainLabel: "Télécharger à nouveau",
   chooseAnotherLabel: "Choisir une autre sauvegarde",
@@ -313,9 +316,9 @@ const frTranslations: TranslationStrings = {
   statsMoves: "trajets",
   statsPois: "lieux",
   handoffTitle: "Comment importer dans Path sur iPhone",
-  handoffStep1: "Transférez le fichier .sqlite sur votre iPhone via AirDrop ou iCloud Drive.",
-  handoffStep2: "Ouvrez Path sur iPhone, puis allez dans Réglages → Données et stockage.",
-  handoffStep3: "Appuyez sur « Importer depuis SQLite » et sélectionnez ce fichier.",
+  handoffStep1: "Transférez le fichier .db sur votre iPhone via AirDrop ou iCloud Drive.",
+  handoffStep2: "Ouvrez Path sur iPhone, puis allez dans Réglages → Gestion des données → Importer des données.",
+  handoffStep3: "Sélectionnez le fichier de base de données pour lancer l'importation.",
 };
 
 const esTranslations: TranslationStrings = {
@@ -336,8 +339,10 @@ const esTranslations: TranslationStrings = {
   cancelConfirm: "¿Deseas cancelar la conversión? El progreso se descartará.",
   completeStep: "Paso 3 de 3",
   completeTitle: "Archivo listo para importar",
-  completeSavedBody: "Tu base de datos se guardó en la carpeta seleccionada. Abre Path en tu iPhone para importarla.",
-  completeDownloadBody: "Tu base de datos se descargó automáticamente. Abre Path en tu iPhone para importarla.",
+  completeSavedBody:
+    "Tu base de datos se guardó en la carpeta seleccionada. Abre Path en tu iPhone y ve a Ajustes → Gestión de datos → Importar datos.",
+  completeDownloadBody:
+    "Tu base de datos se descargó automáticamente. Abre Path en tu iPhone y ve a Ajustes → Gestión de datos → Importar datos.",
   savedStatus: "Guardado en disco",
   downloadAgainLabel: "Descargar de nuevo",
   chooseAnotherLabel: "Elegir otra copia",
@@ -352,9 +357,9 @@ const esTranslations: TranslationStrings = {
   statsMoves: "desplazamientos",
   statsPois: "lugares",
   handoffTitle: "Cómo importar en Path en tu iPhone",
-  handoffStep1: "Transfiere el archivo .sqlite a tu iPhone mediante AirDrop o iCloud Drive.",
-  handoffStep2: "Abre Path en tu iPhone y ve a Ajustes → Datos y almacenamiento.",
-  handoffStep3: "Toca «Importar desde SQLite» y selecciona este archivo.",
+  handoffStep1: "Transfiere el archivo .db a tu iPhone mediante AirDrop o iCloud Drive.",
+  handoffStep2: "Abre Path en tu iPhone y ve a Ajustes → Gestión de datos → Importar datos.",
+  handoffStep3: "Selecciona el archivo de base de datos para comenzar a importar.",
 };
 
 const allTranslations: Record<LocaleCode, TranslationStrings> = {
@@ -376,6 +381,10 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     workingTitle: "Convertendo dados",
     cancelLabel: "Cancelar conversão",
     completeTitle: "Arquivo de importação pronto",
+    completeSavedBody:
+      "Seu banco de dados de importação foi salvo na pasta selecionada. Abra o Path no iPhone e vá em Ajustes → Gerenciamento de Dados → Importar Dados.",
+    completeDownloadBody:
+      "Seu banco de dados de importação foi baixado automaticamente. Abra o Path no iPhone e vá em Ajustes → Gerenciamento de Dados → Importar Dados.",
     savedStatus: "Salvo no disco",
     downloadAgainLabel: "Baixar novamente",
     chooseAnotherLabel: "Escolher outro backup",
@@ -385,9 +394,9 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     statsMoves: "deslocamentos",
     statsPois: "locais",
     handoffTitle: "Como importar no Path no iPhone",
-    handoffStep1: "Envie o arquivo .sqlite para seu iPhone via AirDrop ou iCloud Drive.",
-    handoffStep2: "Abra o Path no iPhone e acesse Ajustes → Dados e Armazenamento.",
-    handoffStep3: "Toque em «Importar do SQLite» e selecione este arquivo.",
+    handoffStep1: "Envie o arquivo .db para seu iPhone via AirDrop ou iCloud Drive.",
+    handoffStep2: "Abra o Path no iPhone e acesse Ajustes → Gerenciamento de Dados → Importar Dados.",
+    handoffStep3: "Selecione o arquivo do banco de dados para iniciar a importação.",
     privacyStatement:
       "O Path Import foi projetado para funcionar offline: todos os arquivos selecionados são lidos e convertidos localmente neste dispositivo, sem nenhum envio de dados. Depois que a página carregar, você pode desconectar da internet.",
   },
@@ -401,6 +410,10 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     workingTitle: "Conversione dei dati in corso",
     cancelLabel: "Annulla conversione",
     completeTitle: "File pronto per l'importazione",
+    completeSavedBody:
+      "Il database di importazione è stato salvato nella cartella selezionata. Apri Path su iPhone e vai su Impostazioni → Gestione dati → Importa dati.",
+    completeDownloadBody:
+      "Il database di importazione è stato scaricato automaticamente. Apri Path su iPhone e vai su Impostazioni → Gestione dati → Importa dati.",
     savedStatus: "Salvato su disco",
     downloadAgainLabel: "Scarica di nuovo",
     chooseAnotherLabel: "Scegli un altro backup",
@@ -410,9 +423,9 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     statsMoves: "spostamenti",
     statsPois: "luoghi",
     handoffTitle: "Come importare in Path su iPhone",
-    handoffStep1: "Trasferisci il file .sqlite sul tuo iPhone tramite AirDrop o iCloud Drive.",
-    handoffStep2: "Apri Path su iPhone, vai in Impostazioni → Dati e archiviazione.",
-    handoffStep3: "Tocca «Importa da SQLite» e seleziona questo file.",
+    handoffStep1: "Trasferisci il file .db sul tuo iPhone tramite AirDrop o iCloud Drive.",
+    handoffStep2: "Apri Path su iPhone, vai in Impostazioni → Gestione dati → Importa dati.",
+    handoffStep3: "Seleziona il file del database per avviare l'importazione.",
     privacyStatement:
       "Path Import è progettato per funzionare offline: tutti i file selezionati vengono letti e convertiti interamente su questo dispositivo, senza alcun caricamento. Una volta caricata la pagina, puoi disconnetterti da Internet.",
   },
@@ -426,6 +439,10 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     workingTitle: "Gegevens converteren",
     cancelLabel: "Conversie annuleren",
     completeTitle: "Importbestand gereed",
+    completeSavedBody:
+      "Je importdatabase is opgeslagen in de geselecteerde map. Open Path op je iPhone en ga naar Instellingen → Gegevensbeheer → Gegevens importeren.",
+    completeDownloadBody:
+      "Je importdatabase is automatisch gedownload. Open Path op je iPhone en ga naar Instellingen → Gegevensbeheer → Gegevens importeren.",
     savedStatus: "Opgeslagen op schijf",
     downloadAgainLabel: "Opnieuw downloaden",
     chooseAnotherLabel: "Kies andere backup",
@@ -435,9 +452,9 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     statsMoves: "ritten & wandelingen",
     statsPois: "plekken",
     handoffTitle: "Zo importeer je in Path op de iPhone",
-    handoffStep1: "Stuur het .sqlite-bestand naar je iPhone via AirDrop of iCloud Drive.",
-    handoffStep2: "Open Path op je iPhone en ga naar Instellingen → Gegevens & Opslag.",
-    handoffStep3: "Tik op 'Importeren vanuit SQLite' en selecteer dit bestand.",
+    handoffStep1: "Stuur het .db-bestand naar je iPhone via AirDrop of iCloud Drive.",
+    handoffStep2: "Open Path op je iPhone en ga naar Instellingen → Gegevensbeheer → Gegevens importeren.",
+    handoffStep3: "Selecteer het databasebestand om de import te starten.",
     privacyStatement:
       "Path Import is ontworpen om offline te werken: alle geselecteerde bestanden worden volledig lokaal op dit apparaat gelezen en geconverteerd, zonder uploads. Zodra de pagina is geladen, kun je de internetverbinding verbreken.",
   },
@@ -445,6 +462,14 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     ...enTranslations,
     selectFolderLabel: "Vælg backup-mappe",
     selectZipLabel: "eller vælg .zip-arkiv",
+    completeSavedBody:
+      "Din importdatabase blev gemt i den valgte mappe. Åbn Path på din iPhone, og gå til Indstillinger → Datastyring → Importer data.",
+    completeDownloadBody:
+      "Din importdatabase blev downloadet automatisk. Åbn Path på din iPhone, og gå til Indstillinger → Datastyring → Importer data.",
+    handoffTitle: "Sådan importerer du til Path på iPhone",
+    handoffStep1: "Overfør .db-filen til din iPhone via AirDrop eller iCloud Drive.",
+    handoffStep2: "Åbn Path på din iPhone, og gå til Indstillinger → Datastyring → Importer data.",
+    handoffStep3: "Vælg databasefilen for at starte importen.",
     privacyStatement:
       "Path Import er designet til at fungere offline: alle valgte filer læses og konverteres udelukkende lokalt på denne enhed uden upload. Når siden er indlæst, kan du afbryde internetforbindelsen.",
   },
@@ -452,6 +477,14 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     ...enTranslations,
     selectFolderLabel: "Valitse varmuuskopiokansio",
     selectZipLabel: "tai valitse .zip-arkisto",
+    completeSavedBody:
+      "Tuontitietokanta tallennettiin valittuun kansioon. Avaa Path iPhonessa ja siirry kohtaan Asetukset → Tiedonhallinta → Tuo tiedot.",
+    completeDownloadBody:
+      "Tuontitietokanta ladattiin automaattisesti. Avaa Path iPhonessa ja siirry kohtaan Asetukset → Tiedonhallinta → Tuo tiedot.",
+    handoffTitle: "Näin tuot tiedot Path-sovellukseen iPhonessa",
+    handoffStep1: "Siirrä .db-tiedosto iPhoneesi AirDropin tai iCloud Driven kautta.",
+    handoffStep2: "Avaa Path iPhonessasi ja siirry kohtaan Asetukset → Tiedonhallinta → Tuo tiedot.",
+    handoffStep3: "Valitse tietokantatiedosto aloittaaksesi tuonnin.",
     privacyStatement:
       "Path Import on suunniteltu toimimaan offline-tilassa: kaikki valitut tiedostot luetaan ja muunnetaan täysin paikallisesti tällä laitteella ilman tiedonsiirtoa verkkoon. Kun sivu on ladattu, voit katkaista internetyhteyden.",
   },
@@ -459,6 +492,14 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     ...enTranslations,
     selectFolderLabel: "Välj backupmapp",
     selectZipLabel: "eller välj .zip-arkiv",
+    completeSavedBody:
+      "Din importdatabas sparades i den valda mappen. Öppna Path på din iPhone och gå till Inställningar → Datahantering → Importera data.",
+    completeDownloadBody:
+      "Din importdatabas laddades ned automatiskt. Öppna Path på din iPhone och gå till Inställningar → Datahantering → Importera data.",
+    handoffTitle: "Så här importerar du till Path på iPhone",
+    handoffStep1: "Överför .db-filen till din iPhone via AirDrop eller iCloud Drive.",
+    handoffStep2: "Öppna Path på din iPhone och gå till Inställningar → Datahantering → Importera data.",
+    handoffStep3: "Välj databasfilen för att starta importen.",
     privacyStatement:
       "Path Import är utformat för att fungera offline: alla valda filer läses och konverteras helt lokalt på denna enhet, utan uppladdningar. När sidan har laddats kan du koppla från internet.",
   },
@@ -466,6 +507,14 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     ...enTranslations,
     selectFolderLabel: "Wybierz folder kopii zapasowej",
     selectZipLabel: "lub wybierz archiwum .zip",
+    completeSavedBody:
+      "Baza danych importu została zapisana w wybranym folderze. Otwórz Path na iPhonie i przejdź do Ustawienia → Zarządzanie danymi → Importuj dane.",
+    completeDownloadBody:
+      "Baza danych importu została pobrana automatycznie. Otwórz Path na iPhonie i przejdź do Ustawienia → Zarządzanie danymi → Importuj dane.",
+    handoffTitle: "Jak zaimportować dane do Path na iPhonie",
+    handoffStep1: "Prześlij plik .db na swojego iPhone'a przez AirDrop lub iCloud Drive.",
+    handoffStep2: "Otwórz Path na iPhonie i przejdź do Ustawienia → Zarządzanie danymi → Importuj dane.",
+    handoffStep3: "Wybierz plik bazy danych, aby rozpocząć import.",
     privacyStatement:
       "Path Import został zaprojektowany do pracy w trybie offline: wszystkie wybrane pliki są odczytywane i konwertowane w całości lokalnie na tym urządzeniu, bez wysyłania danych. Po załadowaniu strony możesz odłączyć się od internetu.",
   },
@@ -473,6 +522,14 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     ...enTranslations,
     selectFolderLabel: "Вибрати папку резервної копії",
     selectZipLabel: "або вибрати .zip архів",
+    completeSavedBody:
+      "Базу даних імпорту збережено у вибраній папці. Відкрийте Path на iPhone і перейдіть у Параметри → Керування даними → Імпортувати дані.",
+    completeDownloadBody:
+      "Базу даних імпорту завантажено автоматично. Відкрийте Path на iPhone і перейдіть у Параметри → Керування даними → Імпортувати дані.",
+    handoffTitle: "Як імпортувати в Path на iPhone",
+    handoffStep1: "Передайте файл .db на свій iPhone через AirDrop або iCloud Drive.",
+    handoffStep2: "Відкрийте Path на своєму iPhone і перейдіть у Параметри → Керування даними → Імпортувати дані.",
+    handoffStep3: "Виберіть файл бази даних, щоб розпочати імпорт.",
     privacyStatement:
       "Path Import створено для автономної роботи: усі вибрані файли читаються та конвертуються виключно локально на цьому пристрої без завантаження в мережу. Після завантаження сторінки ви можете відключити інтернет.",
   },
@@ -480,6 +537,14 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     ...enTranslations,
     selectFolderLabel: "Pilih folder cadangan",
     selectZipLabel: "atau pilih arsip .zip",
+    completeSavedBody:
+      "Database impor Anda telah disimpan di folder yang dipilih. Buka Path di iPhone dan buka Pengaturan → Manajemen Data → Impor Data.",
+    completeDownloadBody:
+      "Database impor Anda telah diunduh secara otomatis. Buka Path di iPhone dan buka Pengaturan → Manajemen Data → Impor Data.",
+    handoffTitle: "Cara mengimpor ke Path di iPhone",
+    handoffStep1: "Transfer file .db ke iPhone Anda melalui AirDrop atau iCloud Drive.",
+    handoffStep2: "Buka Path di iPhone Anda, lalu buka Pengaturan → Manajemen Data → Impor Data.",
+    handoffStep3: "Pilih file database untuk memulai proses impor.",
     privacyStatement:
       "Path Import dirancang untuk bekerja secara offline: semua file yang Anda pilih dibaca dan dikonversi sepenuhnya di perangkat ini, tanpa unggahan apa pun. Setelah halaman dimuat, Anda dapat memutus koneksi internet.",
   },
@@ -487,6 +552,14 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     ...enTranslations,
     selectFolderLabel: "เลือกโฟลเดอร์สำรองข้อมูล",
     selectZipLabel: "หรือเลือกไฟล์ .zip",
+    completeSavedBody:
+      "ฐานข้อมูลการนำเข้าของคุณได้รับการบันทึกในโฟลเดอร์ที่เลือกแล้ว เปิด Path บน iPhone ของคุณ แล้วไปที่ การตั้งค่า → การจัดการข้อมูล → นำเข้าข้อมูล",
+    completeDownloadBody:
+      "ฐานข้อมูลการนำเข้าของคุณได้รับการดาวน์โหลดโดยอัตโนมัติแล้ว เปิด Path บน iPhone ของคุณ แล้วไปที่ การตั้งค่า → การจัดการข้อมูล → นำเข้าข้อมูล",
+    handoffTitle: "วิธีนำเข้าข้อมูลไปยัง Path บน iPhone",
+    handoffStep1: "ถ่ายโอนไฟล์ .db ไปยัง iPhone ของคุณผ่าน AirDrop หรือ iCloud Drive",
+    handoffStep2: "เปิด Path บน iPhone ของคุณ แล้วไปที่ การตั้งค่า → การจัดการข้อมูล → นำเข้าข้อมูล",
+    handoffStep3: "เลือกไฟล์ฐานข้อมูลเพื่อเริ่มนำเข้าข้อมูล",
     privacyStatement:
       "Path Import ได้รับการออกแบบให้ทำงานแบบออฟไลน์: ไฟล์ทั้งหมดที่คุณเลือกจะถูกอ่านและแปลงข้อมูลภายในอุปกรณ์นี้โดยสมบูรณ์ โดยไม่มีการอัปโหลดข้อมูลใดๆ เมื่อหน้าเว็บโหลดเสร็จแล้ว คุณสามารถตัดการเชื่อมต่ออินเทอร์เน็ตได้ทันที",
   },
@@ -494,6 +567,14 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     ...enTranslations,
     selectFolderLabel: "Chọn thư mục sao lưu",
     selectZipLabel: "hoặc chọn tệp .zip",
+    completeSavedBody:
+      "Cơ sở dữ liệu nhập của bạn đã được lưu trong thư mục đã chọn. Mở Path trên iPhone và vào Cài đặt → Quản lý dữ liệu → Nhập dữ liệu.",
+    completeDownloadBody:
+      "Cơ sở dữ liệu nhập của bạn đã được tải xuống tự động. Mở Path trên iPhone và vào Cài đặt → Quản lý dữ liệu → Nhập dữ liệu.",
+    handoffTitle: "Cách nhập vào Path trên iPhone",
+    handoffStep1: "Chuyển tệp .db sang iPhone của bạn qua AirDrop hoặc iCloud Drive.",
+    handoffStep2: "Mở Path trên iPhone của bạn, sau đó vào Cài đặt → Quản lý dữ liệu → Nhập dữ liệu.",
+    handoffStep3: "Chọn tệp cơ sở dữ liệu để bắt đầu nhập dữ liệu.",
     privacyStatement:
       "Path Import được thiết kế để hoạt động ngoại tuyến: tất cả các tệp bạn chọn được đọc và chuyển đổi hoàn toàn cục bộ trên thiết bị này mà không tải lên bất kỳ dữ liệu nào. Sau khi trang tải xong, bạn có thể ngắt kết nối internet.",
   },
