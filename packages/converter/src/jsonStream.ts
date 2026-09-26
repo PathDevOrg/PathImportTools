@@ -248,8 +248,8 @@ const crc32Table = Uint32Array.from({ length: 256 }, (_, value) => {
 
 export function updateCrc32(crc: number, bytes: Uint8Array): number {
   let current = crc;
-  for (const byte of bytes) {
-    current = crc32Table[(current ^ byte) & 0xff]! ^ (current >>> 8);
+  for (let index = 0; index < bytes.length; index += 1) {
+    current = crc32Table[(current ^ bytes[index]!) & 0xff]! ^ (current >>> 8);
   }
   return current >>> 0;
 }

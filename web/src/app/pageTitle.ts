@@ -29,6 +29,8 @@ function titlePhase(phase: WorkerProgress["phase"]): string {
     case "read":
     case "parse":
       return "Parsing";
+    case "materialize":
+      return "Building";
     case "normalize":
       return "Normalizing";
     case "schema":

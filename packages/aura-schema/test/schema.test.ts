@@ -1,12 +1,12 @@
 import { describe, expect, test } from "vitest";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { schemaFile } from "../src/index.js";
 
-const configuredAppSchemaPath = process.env.AURA_SCHEMA_PATH;
-const liveAppSchemaPath = configuredAppSchemaPath ? resolve(configuredAppSchemaPath) : null;
+const configuredMigrationsDirectory = process.env.AURA_MIGRATIONS_DIR;
+const appMigrationsDirectory = configuredMigrationsDirectory ? resolve(configuredMigrationsDirectory) : null;
 
 describe("Aura schema metadata", () => {
   test("describes one directly installable V13 schema", () => {
@@ -38,12 +38,16 @@ describe("Aura schema metadata", () => {
     expect(result.stdout.trim().split("\n").filter((value) => value === "tz_offset_s")).toHaveLength(1);
   });
 
-  const schemaComparisonTest = liveAppSchemaPath ? test : test.skip;
+  const schemaComparisonTest = appMigrationsDirectory ? test : test.skip;
 
-  schemaComparisonTest("matches the live Path V13 schema when AURA_SCHEMA_PATH is provided", () => {
+  schemaComparisonTest("matches the Path schema built from app migrations V1 through V13", () => {
     const importerSchema = readFileSync(resolve("packages/aura-schema", schemaFile.name), "utf8");
-    const appSchema = readFileSync(liveAppSchemaPath as string, "utf8");
-    expect(schemaSnapshot(importerSchema)).toEqual(schemaSnapshot(appSchema));
+    const migrations = readdirSync(appMigrationsDirectory as string)
+      .map((name) => ({ name, version: Number(/^V(\d+)_.*\.sql$/.exec(name)?.[1]) }))
+      .filter((migration) => Number.isInteger(migration.version) && migration.version <= schemaFile.version)
+      .sort((lhs, rhs) => lhs.version - rhs.version)
+      .map((migration) => readFileSync(join(appMigrationsDirectory as string, migration.name), "utf8"));
+    expect(schemaSnapshot(importerSchema)).toEqual(schemaSnapshot(migrations.join("\n")));
   });
 
   test("contains creation-only V13 DDL without the removed samples R-Tree", () => {
@@ -128,5 +132,13 @@ function schemaSnapshot(sql: string): string[] {
   expect(result.status, result.stderr).toBe(0);
   const markerIndex = result.stdout.indexOf(`${marker}\n`);
   expect(markerIndex).toBeGreaterThanOrEqual(0);
-  return result.stdout.slice(markerIndex + marker.length + 1).trim().split("\n");
+  return result.stdout
+    .slice(markerIndex + marker.length + 1)
+    .trim()
+    .split("\n")
+    .map((line) => {
+      const [type, name, table, hexSql = ""] = line.split("|");
+      const sql = Buffer.from(hexSql, "hex").toString("utf8").replace(/\s+/g, " ").replace(/\( /g, "(").replace(/ \)/g, ")");
+      return [type, name, table, sql].join("|");
+    });
 }

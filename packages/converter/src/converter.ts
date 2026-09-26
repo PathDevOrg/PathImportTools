@@ -20,6 +20,7 @@ import {
   minimumReconstructedMoveDistanceM,
   minimumReconstructedStayRadiusM,
   movesLastServiceDayEndTs,
+  observationProgressInterval,
   progressReportInterval,
   provider as providers,
   routePointDuplicateTimestampDistanceM,
@@ -36,6 +37,7 @@ import { mapActivityType } from "./modes.js";
 import { arcBackupFileKind, classifySourcePath } from "./sourceSelection.js";
 import { extractTimezoneOffsetSeconds, parseImportTimestamp } from "./time.js";
 import { verifyTimelineIntegrity } from "./timelineIntegrity.js";
+import { TimezoneAnchorCollector, type TimezoneAnchors } from "./timezoneAnchors.js";
 import type {
   AuraRows,
   ConversionResult,
@@ -69,6 +71,7 @@ type MutableState = {
   next: Record<keyof Omit<AuraRows, "stay_pois">, number>;
   poiCache: Map<string, number>;
   poiRevisions: Map<number, number>;
+  mapboxPlaceOwners: Map<string, string>;
   arcPlaces: Map<
     string,
     { center: { lat: number; lon: number }; radius: number | null; timezoneOffset: number | null }
@@ -87,6 +90,7 @@ type MutableState = {
   diagnostics: string[];
   diagnosticCounts: Map<string, number>;
   streamedCounts: Record<StreamableAuraTable, number>;
+  timezoneAnchors: TimezoneAnchors | null;
   onRows?: <T extends StreamableAuraTable>(table: T, rows: StreamableAuraRows[T]) => void;
 };
 
@@ -348,15 +352,32 @@ export async function convertImportFileHandles(
       }
       throw evidence.firstError ?? new Error("No supported Arc or Moves history was found");
     }
-    fuseMovesEvidence(ledger, options.signal);
+    const timezoneCollector = new TimezoneAnchorCollector();
+    const movesDayCount = fuseMovesEvidence(ledger, timezoneCollector, options.onProgress, options.signal);
     ledger.seal();
-    materializeArcEvidence(evidence, ledger, state, options.signal);
+    ledger.forEachTimezoneOffset((ts, offset) => timezoneCollector.addOrdered(ts, offset));
+    state.timezoneAnchors = timezoneCollector.build();
+    materializeArcEvidence(evidence, ledger, state, options.onProgress, options.signal);
+    let materializedMovesDays = 0;
     ledger.forEachFusedMovesDay((day) => {
       throwIfAborted(options.signal);
       materializeMovesEvidence([day], state);
+      materializedMovesDays += 1;
+      if (materializedMovesDays % progressReportInterval === 0 || materializedMovesDays === movesDayCount) {
+        reportProgress(
+          options.onProgress,
+          "materialize",
+          "Building Moves timeline",
+          materializedMovesDays,
+          movesDayCount,
+          options.signal,
+        );
+      }
     });
+    fillMissingTimezoneOffsets(state);
+    reportProgress(options.onProgress, "materialize", "Resolving step counts", 0, 1, options.signal);
     materializePedometerClaims(state, options.signal);
-    materializeArcObservations(ledger, state, options.signal);
+    materializeArcObservations(ledger, state, options.onProgress, options.signal);
   } finally {
     await ledger.close();
   }
@@ -443,6 +464,7 @@ function makeState(onRows?: ConversionOptions["onRows"]): MutableState {
     },
     poiCache: new Map(),
     poiRevisions: new Map(),
+    mapboxPlaceOwners: new Map(),
     arcPlaces: new Map(),
     itemMap: new Map(),
     moveIndex: new Map(),
@@ -463,6 +485,7 @@ function makeState(onRows?: ConversionOptions["onRows"]): MutableState {
       raw_motion_activity: 0,
       raw_pedometer: 0,
     },
+    timezoneAnchors: null,
     onRows,
   };
 }
@@ -1033,6 +1056,7 @@ function materializeArcEvidence(
   evidence: HistoryEvidence,
   ledger: EvidenceLedger,
   state: MutableState,
+  onProgress: ConversionOptions["onProgress"],
   signal?: AbortSignal,
 ): void {
   for (const placeId of [...evidence.arcPlaces.keys()].sort()) {
@@ -1065,15 +1089,19 @@ function materializeArcEvidence(
         arcItemStart(lhs.item) - arcItemStart(rhs.item) ||
         compareStableStrings(canonicalJson(lhs.item), canonicalJson(rhs.item)),
     );
-  const fragmentWindows = findArcFragmentWindows(items);
+  const fragmentWindows = findArcFragmentWindows(items, state.timezoneAnchors);
   const fragmentedItems = new Set(fragmentWindows.flatMap((window) => window.items));
 
-  collectArcPedometerClaims(items, ledger, state, signal);
-
-  for (const fused of items) {
+  for (const [sequence, fused] of items.entries()) {
     throwIfAborted(signal);
+    const itemId = stringValue(fused.item.itemId);
+    const samples = ledger.observationsForTimelineItem(itemId ?? fused.observationLink) as JsonObject[];
+    collectArcPedometerClaim(fused, samples, state, sequence);
     if (!fragmentedItems.has(fused)) {
-      importFusedArcItem(fused, ledger, state);
+      importFusedArcItem(fused, samples, ledger, state);
+    }
+    if ((sequence + 1) % progressReportInterval === 0 || sequence + 1 === items.length) {
+      reportProgress(onProgress, "materialize", "Building Arc timeline", sequence + 1, items.length, signal);
     }
   }
 
@@ -1096,37 +1124,43 @@ function materializeArcEvidence(
   reconstructUnlinkedArcObservations(ledger, state, knownTimelineItemIds, signal);
 }
 
-function collectArcPedometerClaims(
-  items: FusedArcItem[],
-  ledger: EvidenceLedger,
+function collectArcPedometerClaim(
+  fused: FusedArcItem,
+  samples: JsonObject[],
   state: MutableState,
-  signal?: AbortSignal,
+  sequence: number,
 ): void {
-  for (const [sequence, fused] of items.entries()) {
-    throwIfAborted(signal);
-    const itemId = stringValue(fused.item.itemId);
-    const samples = ledger.observationsForTimelineItem(itemId ?? fused.observationLink) as JsonObject[];
-    const item = samples.length > 0 ? { ...fused.item, samples } : fused.item;
-    const placeId = stringValue(item.placeId);
-    const timezoneOffset =
-      timezoneOffsetValue(samples[0]?.secondsFromGMT) ??
-      timezoneOffsetValue(item.secondsFromGMT) ??
-      (placeId ? (state.arcPlaces.get(placeId)?.timezoneOffset ?? null) : null);
-    importPedometerData(item, state, timezoneOffset, sequence);
-  }
+  const item = samples.length > 0 ? { ...fused.item, samples } : fused.item;
+  const placeId = stringValue(item.placeId);
+  const end = parseImportTimestamp(stringValue(item.endDate));
+  const timezoneOffset =
+    timezoneOffsetValue(samples[0]?.secondsFromGMT) ??
+    timezoneOffsetValue(item.secondsFromGMT) ??
+    (placeId ? (state.arcPlaces.get(placeId)?.timezoneOffset ?? null) : null) ??
+    (end === null ? null : (state.timezoneAnchors?.offsetAt(end) ?? null));
+  importPedometerData(item, state, timezoneOffset, sequence);
 }
 
-function materializeArcObservations(ledger: EvidenceLedger, state: MutableState, signal?: AbortSignal): void {
-  ledger.forEachTimelineItem((timelineItemId, samples) => {
-    throwIfAborted(signal);
-    if (timelineItemId) {
-      importArcBackupRoutes(samples as JsonObject[], state);
-    }
-  });
+function materializeArcObservations(
+  ledger: EvidenceLedger,
+  state: MutableState,
+  onProgress: ConversionOptions["onProgress"],
+  signal?: AbortSignal,
+): void {
+  const total = ledger.observationCount();
+  let completed = 0;
+  let reported = 0;
+  reportProgress(onProgress, "materialize", "Writing location samples", 0, total, signal);
   ledger.forEachCanonicalObservation((samples) => {
     throwIfAborted(signal);
     importSamples(samples as JsonObject[], state);
+    completed += samples.length;
+    if (completed - reported >= observationProgressInterval) {
+      reported = completed;
+      reportProgress(onProgress, "materialize", "Writing location samples", completed, total, signal);
+    }
   });
+  reportProgress(onProgress, "materialize", "Writing location samples", total, total, signal);
 }
 
 function fuseArcItemCandidates(candidates: ArcItemCandidate[], observationLink: string): FusedArcItem {
@@ -1283,12 +1317,38 @@ function fingerprintJson(value: unknown): string {
   return `${first.toString(16)}:${second.toString(16)}:${length}`;
 }
 
-function importFusedArcItem(fused: FusedArcItem, ledger: EvidenceLedger, state: MutableState): void {
+function importFusedArcItem(
+  fused: FusedArcItem,
+  samples: JsonObject[],
+  ledger: EvidenceLedger,
+  state: MutableState,
+): void {
   const itemId = stringValue(fused.item.itemId);
-  const samples = ledger.observationsForTimelineItem(itemId ?? fused.observationLink);
   const firstSample = samples[0] ?? null;
   const item: JsonObject = samples.length > 0 ? { ...fused.item, samples } : { ...fused.item };
   item.secondsFromGMT = timezoneOffsetValue(item.secondsFromGMT) ?? timezoneOffsetValue(firstSample?.secondsFromGMT);
+  const pathActivity =
+    item.isVisit === true
+      ? null
+      : (stringValue(item.activityType) ?? stringValue(item.confirmedType))?.trim().toLowerCase();
+  const pathStart = arcItemStart(item);
+  const pathEnd = arcItemEnd(item);
+  if ((pathActivity === "bogus" || pathActivity === "stationary") && pathEnd > pathStart) {
+    if (pathActivity === "bogus") {
+      insertImportGap(
+        state,
+        pathStart,
+        pathEnd,
+        timelineNote.arcBogus,
+        arcTimelineTimezoneOffsets(item, samples as JsonObject[], state),
+      );
+      recordDiagnostic(state, "Replaced an Arc path marked bogus with a gap");
+    } else {
+      reconstructArcInterval(pathStart, pathEnd, ledger, state);
+      recordDiagnostic(state, "Rebuilt an Arc stationary path from its samples");
+    }
+    return;
+  }
   if (isLowConfidenceArcItem(item) && !arcItemSupportedBySamples(item, samples as JsonObject[])) {
     const start = arcItemStart(item);
     const end = arcItemEnd(item);
@@ -1318,10 +1378,10 @@ function importFusedArcItem(fused: FusedArcItem, ledger: EvidenceLedger, state: 
   }
 }
 
-function findArcFragmentWindows(items: FusedArcItem[]): ArcFragmentWindow[] {
+function findArcFragmentWindows(items: FusedArcItem[], anchors: TimezoneAnchors | null): ArcFragmentWindow[] {
   const grouped = new Map<string, FusedArcItem[]>();
   for (const item of items) {
-    const key = arcLocalDayKey(item.item);
+    const key = arcLocalDayKey(item.item, anchors);
     const group = grouped.get(key) ?? [];
     group.push(item);
     grouped.set(key, group);
@@ -1406,9 +1466,10 @@ function findArcFragmentWindows(items: FusedArcItem[]): ArcFragmentWindow[] {
   return windows.sort((lhs, rhs) => lhs.start - rhs.start);
 }
 
-function arcLocalDayKey(item: JsonObject): string {
+function arcLocalDayKey(item: JsonObject, anchors: TimezoneAnchors | null): string {
   const start = arcItemStart(item);
-  const offset = timezoneOffsetValue(item.secondsFromGMT) ?? 0;
+  const offset =
+    timezoneOffsetValue(item.secondsFromGMT) ?? (Number.isFinite(start) ? anchors?.offsetAt(start) : null) ?? 0;
   return Number.isFinite(start) ? Math.floor((start + offset) / 86_400).toString() : canonicalJson(item);
 }
 
@@ -1647,11 +1708,10 @@ function reconstructArcInterval(
     distance >= minimumReconstructedMoveDistanceM &&
     plausibleMovingGeometry
   ) {
-    const activity = samples.map(sampleActivity).find((value) => value && value !== "stationary") ?? null;
     const move = insertMove(state, {
       start: reconstructedStart,
       end: reconstructedEnd,
-      mode: mapActivityType(activity),
+      mode: dominantArcSampleMoveMode(samples),
       distance,
       tzOffset: timezoneOffsets.start,
       endTzOffset: timezoneOffsets.end,
@@ -1741,7 +1801,10 @@ function insertImportGap(
 
 function sampleTimestamp(sample: JsonObject): number | null {
   const location = asObject(sample.location);
-  return parseImportTimestamp(stringValue(location?.timestamp) ?? stringValue(sample.date));
+  return (
+    numberValue(sample[evidenceKey.observationTimestamp]) ??
+    parseImportTimestamp(stringValue(location?.timestamp) ?? stringValue(sample.date))
+  );
 }
 
 function arcTimelineTimezoneOffsets(item: JsonObject, samples: JsonObject[], state: MutableState): TimezoneOffsets {
@@ -1806,12 +1869,53 @@ function percentile(sortedValues: number[], percentileValue: number): number | n
   return sortedValues[Math.min(sortedValues.length - 1, Math.floor((sortedValues.length - 1) * percentileValue))]!;
 }
 
-function fuseMovesEvidence(ledger: EvidenceLedger, signal?: AbortSignal): void {
-  for (const date of ledger.movesDayDates()) {
+function fuseMovesEvidence(
+  ledger: EvidenceLedger,
+  timezoneCollector: TimezoneAnchorCollector,
+  onProgress: ConversionOptions["onProgress"],
+  signal?: AbortSignal,
+): number {
+  const dates = ledger.movesDayDates();
+  for (const [index, date] of dates.entries()) {
     throwIfAborted(signal);
     const day = fuseMovesDayCandidates(ledger.movesDayCandidates(date));
     addMovesTrackPointEvidence(day, ledger);
+    addMovesTimezoneAnchors(day, timezoneCollector);
     ledger.storeFusedMovesDay(date, day);
+    if ((index + 1) % progressReportInterval === 0 || index + 1 === dates.length) {
+      reportProgress(onProgress, "materialize", "Fusing Moves days", index + 1, dates.length, signal);
+    }
+  }
+  return dates.length;
+}
+
+function addMovesTimezoneAnchors(day: JsonObject, timezoneCollector: TimezoneAnchorCollector): void {
+  for (const segment of arrayValue(day.segments)) {
+    for (const value of [segment, ...arrayValue(segment.activities)]) {
+      for (const timestamp of [stringValue(value.startTime), stringValue(value.endTime)]) {
+        const ts = parseImportTimestamp(timestamp);
+        const offset = extractTimezoneOffsetSeconds(timestamp);
+        if (ts !== null && offset !== null) {
+          timezoneCollector.addUnordered(ts, offset);
+        }
+      }
+    }
+  }
+}
+
+function fillMissingTimezoneOffsets(state: MutableState): void {
+  const anchors = state.timezoneAnchors;
+  if (!anchors) {
+    return;
+  }
+  for (const row of [...state.rows.stays, ...state.rows.moves, ...state.rows.no_data_gaps]) {
+    row.tz_offset_s ??= anchors.offsetAt(row.start_ts);
+    if (row.end_ts !== null) {
+      row.end_tz_offset_s ??= anchors.offsetAt(row.end_ts);
+    }
+  }
+  for (const row of state.rows.raw_visits) {
+    row.tz_offset_s ??= anchors.offsetAt(row.arrival_ts);
   }
 }
 
@@ -2444,7 +2548,13 @@ function dominantArcSampleMoveMode(samples: JsonObject[]): MoveMode {
     const coreMotion = stringValue(sample.coreMotionActivityType);
     const movingState = stringValue(sample.movingState);
     const activity = confirmed ?? coreMotion ?? movingState;
-    if (!activity || activity === "stationary" || activity === "unknown" || activity === "uncertain") {
+    if (
+      !activity ||
+      activity === "stationary" ||
+      activity === "unknown" ||
+      activity === "uncertain" ||
+      activity === "bogus"
+    ) {
       return [];
     }
     return [{ mode: mapActivityType(activity), rank: confirmed ? 3 : coreMotion ? 2 : 1 }];
@@ -2521,7 +2631,7 @@ function importArcBackupTimelineItem(item: JsonObject, state: MutableState): voi
       centroid_lat: center.lat,
       centroid_lon: center.lon,
       radius_m: poi?.radius_m ?? place?.radius ?? defaultStayRadiusM,
-      type: "venue",
+      type: asObject(item.place)?.isHome === true ? "anchor" : "venue",
       poi_id: poiId,
       tz_offset_s: timezoneOffsets.start,
       end_tz_offset_s: timezoneOffsets.end,
@@ -2548,17 +2658,32 @@ function importArcBackupTimelineItem(item: JsonObject, state: MutableState): voi
     });
     state.itemMap.set(itemId, { kind: "stay", ids: [stay.id] });
   } else {
+    const samples = samplesWithinWindow(arrayValue(item.samples), start, end);
+    const activity = stringValue(item.activityType) ?? stringValue(item.confirmedType);
+    const preparedRoute = prepareRouteFromSamples(samples);
+    const coords = preparedRoute.points.map((point) => point.coord);
     const move = insertMove(state, {
       start,
       end,
-      mode: mapActivityType(stringValue(item.activityType)),
-      distance: null,
+      mode: activity ? mapActivityType(activity) : dominantArcSampleMoveMode(samples),
+      distance: calculatePathDistance(coords),
       tzOffset: timezoneOffsets.start,
       endTzOffset: timezoneOffsets.end,
       provider: providers.arcBackup,
       manual: item.manualActivityType === true || stringValue(item.confirmedType) !== null,
       revision: revisionValue(item),
     });
+    if (coords.length >= 2 && !state.routeEvidence.has(move.id)) {
+      move.distance_m ??= calculatePathDistance(coords);
+      insertRoutePath(
+        state,
+        move.id,
+        coords,
+        providers.arcBackup,
+        preparedRoute.points.map((point) => point.ts),
+        preparedRoute.pathQuality,
+      );
+    }
     state.itemMap.set(itemId, { kind: "move", ids: [move.id] });
   }
 }
@@ -2577,58 +2702,6 @@ function insertRawVisit(state: MutableState, input: Omit<RawVisitRow, "id">): vo
   }
   state.rawVisitKeys.add(key);
   state.rows.raw_visits.push({ id: state.next.raw_visits++, ...input });
-}
-
-function importArcBackupRoutes(samples: JsonObject[], state: MutableState): void {
-  const grouped = new Map<string, JsonObject[]>();
-  for (const sample of samples) {
-    const timelineItemId = stringValue(sample.timelineItemId);
-    if (!timelineItemId) {
-      continue;
-    }
-    const group = grouped.get(timelineItemId) ?? [];
-    group.push(sample);
-    grouped.set(timelineItemId, group);
-  }
-
-  for (const [timelineItemId, group] of grouped) {
-    const mapping = state.itemMap.get(timelineItemId);
-    if (mapping?.kind === "move") {
-      for (const moveId of mapping.ids) {
-        const move = state.rows.moves.find((row) => row.id === moveId);
-        const routeSamples = move
-          ? group.filter((sample) => {
-              const ts = sampleTimestamp(sample);
-              return ts !== null && ts >= move.start_ts && (move.end_ts === null || ts <= move.end_ts);
-            })
-          : [];
-        const preparedRoute = prepareRouteFromSamples(routeSamples);
-        const routePoints = preparedRoute.points;
-        const coords = routePoints.map((point) => point.coord);
-        if (move && coords.length >= 2) {
-          const routeDistance = calculatePathDistance(coords);
-          if (semanticSource(move.provider) === "moves") {
-            move.distance_m ??= routeDistance;
-          } else {
-            move.distance_m = routeDistance;
-          }
-          move.tz_offset_s = move.tz_offset_s ?? timezoneOffsetValue(routeSamples[0]?.secondsFromGMT);
-          move.end_tz_offset_s =
-            move.end_tz_offset_s ?? timezoneOffsetValue(routeSamples.at(-1)?.secondsFromGMT) ?? move.tz_offset_s;
-          if (!state.rows.route_paths.some((path) => path.move_id === move.id)) {
-            insertRoutePath(
-              state,
-              move.id,
-              coords,
-              providers.arcBackup,
-              routePoints.map((point) => point.ts),
-              preparedRoute.pathQuality,
-            );
-          }
-        }
-      }
-    }
-  }
 }
 
 function importMovesDay(day: JsonObject, state: MutableState): void {
@@ -3251,8 +3324,10 @@ function getOrCreateArcPoi(item: JsonObject, state: MutableState, firstSeen: num
 
   const mapboxId = stringValue(place.mapboxPlaceId);
   const placeId = stringValue(place.placeId);
-  const provider = mapboxId ? "mapbox" : "arc";
-  const providerId = mapboxId ?? placeId;
+  const mapboxOwner = mapboxId ? state.mapboxPlaceOwners.get(mapboxId) : undefined;
+  const useMapbox = mapboxId !== null && (placeId === null || mapboxOwner === undefined || mapboxOwner === placeId);
+  const provider = useMapbox ? "mapbox" : "arc";
+  const providerId = useMapbox ? mapboxId : placeId;
   const center = locationFrom(place.center) ?? locationFrom(place.location);
   const name = meaningfulName(place.name);
   if (!center || !name) {
@@ -3261,8 +3336,8 @@ function getOrCreateArcPoi(item: JsonObject, state: MutableState, firstSeen: num
 
   const radius = asObject(place.radius);
   const existingArcId = placeId ? state.poiCache.get(`arc:${placeId}`) : undefined;
-  if (existingArcId) {
-    state.poiCache.set(`${provider}:${providerId}`, existingArcId);
+  if (existingArcId && useMapbox && mapboxOwner === undefined) {
+    state.poiCache.set(`mapbox:${mapboxId}`, existingArcId);
   }
   const poiId = insertPoi(state, {
     provider,
@@ -3279,8 +3354,11 @@ function getOrCreateArcPoi(item: JsonObject, state: MutableState, firstSeen: num
   if (placeId) {
     state.poiCache.set(`arc:${placeId}`, poiId);
   }
-  if (mapboxId) {
+  if (useMapbox) {
     state.poiCache.set(`mapbox:${mapboxId}`, poiId);
+    if (placeId) {
+      state.mapboxPlaceOwners.set(mapboxId, placeId);
+    }
   }
   return poiId;
 }
@@ -3311,7 +3389,7 @@ function insertMove(
       duplicate.tz_offset_s = input.tzOffset ?? duplicate.tz_offset_s;
       duplicate.end_tz_offset_s = input.endTzOffset ?? duplicate.end_tz_offset_s;
       state.semanticEvidence.set(`move:${duplicate.id}`, {
-        manual: input.manual === true,
+        manual: input.manual === true || state.semanticEvidence.get(`move:${duplicate.id}`)?.manual === true,
         revision: input.revision ?? 0,
         source: "moves",
       });
@@ -3418,9 +3496,16 @@ function insertRoutePath(
   timestamps: Array<number | null> = coords.map(() => null),
   pathQuality: PreparedRoute["pathQuality"] = "raw",
 ): RoutePathRow | null {
-  const bounds = calculateBounds(coords);
-  if (!bounds || coords.length < 2) {
+  if (coords.length < 2) {
     return null;
+  }
+  const route = longestAntimeridianSegment(coords);
+  const bounds = calculateBounds(route.coords);
+  if (!bounds || route.coords.length < 2) {
+    return null;
+  }
+  if (route.split) {
+    recordDiagnostic(state, "Kept the longest segment of a route that crosses the antimeridian");
   }
 
   state.routeEvidence.set(moveId, {
@@ -3436,9 +3521,9 @@ function insertRoutePath(
     codec: "bqdc-v1",
     compression: "none",
     quantization_cm: defaultBqdcQuantizationCm,
-    path_blob: encodeBQDCPath(coords),
-    sample_count: coords.length,
-    path_quality: pathQuality,
+    path_blob: encodeBQDCPath(route.coords),
+    sample_count: route.coords.length,
+    path_quality: route.split ? "filtered" : pathQuality,
     provider,
     bbox_min_lat: bounds.minLat,
     bbox_min_lon: bounds.minLon,
@@ -3450,6 +3535,33 @@ function insertRoutePath(
   return row;
 }
 
+function longestAntimeridianSegment(coords: Array<[number, number]>): {
+  coords: Array<[number, number]>;
+  split: boolean;
+} {
+  const boundaries = [0];
+  for (let index = 1; index < coords.length; index += 1) {
+    if (Math.abs(coords[index]![0] - coords[index - 1]![0]) > 180) {
+      boundaries.push(index);
+    }
+  }
+  if (boundaries.length === 1) {
+    return { coords, split: false };
+  }
+  boundaries.push(coords.length);
+  let bestStart = 0;
+  let bestEnd = 0;
+  for (let index = 1; index < boundaries.length; index += 1) {
+    const start = boundaries[index - 1]!;
+    const end = boundaries[index]!;
+    if (end - start > bestEnd - bestStart) {
+      bestStart = start;
+      bestEnd = end;
+    }
+  }
+  return { coords: coords.slice(bestStart, bestEnd), split: true };
+}
+
 function importSamples(samples: JsonObject[], state: MutableState): number {
   const rawGPSRows: RawGPSRow[] = [];
   const sampleRows: SampleRow[] = [];
@@ -3457,11 +3569,13 @@ function importSamples(samples: JsonObject[], state: MutableState): number {
   for (const sample of samples) {
     const location = asObject(sample.location) ?? sample;
     const point = locationFrom(location);
-    const ts = parseImportTimestamp(stringValue(location?.timestamp) ?? stringValue(sample.date));
+    const ts =
+      numberValue(sample[evidenceKey.observationTimestamp]) ??
+      parseImportTimestamp(stringValue(location?.timestamp) ?? stringValue(sample.date));
     if (ts === null || ts < 0) {
       continue;
     }
-    const tzOffset = timezoneOffsetValue(sample.secondsFromGMT);
+    const tzOffset = timezoneOffsetValue(sample.secondsFromGMT) ?? state.timezoneAnchors?.offsetAt(ts) ?? null;
     if (point) {
       const altitude = numberValue(location?.altitude);
       const hAcc = nonNegative(numberValue(location?.horizontalAccuracy));
@@ -4180,14 +4294,6 @@ function normalizeOneRef(
         setSemanticEnd(current, previousEnd, semanticEndTimezoneOffset(previous));
       }
 
-      if (current.row.start_ts <= previous.row.start_ts) {
-        normalized.pop();
-        preserveExactMoveGeometry(state, current, previous);
-        removeSemanticRow(context, previous);
-        recordDiagnostic(state, "Replaced lower-quality overlapping timeline event");
-        continue;
-      }
-
       if (semanticEnd(previous) > semanticEnd(current) && Number.isFinite(semanticEnd(current))) {
         const suffix = cloneSemanticSuffix(
           state,
@@ -4199,6 +4305,14 @@ function normalizeOneRef(
         if (suffix) {
           enqueueSuffix(suffix);
         }
+      }
+
+      if (current.row.start_ts <= previous.row.start_ts) {
+        normalized.pop();
+        preserveExactMoveGeometry(state, current, previous);
+        removeSemanticRow(context, previous);
+        recordDiagnostic(state, "Replaced lower-quality overlapping timeline event");
+        continue;
       }
 
       if (current.row.start_ts > previous.row.start_ts) {

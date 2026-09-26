@@ -30,7 +30,7 @@ export type ImportFileHandle = {
   readChunks?: () => AsyncIterable<Uint8Array>;
 };
 
-export type ImportProgressPhase = "scan" | "read" | "parse" | "normalize" | "report";
+export type ImportProgressPhase = "scan" | "read" | "parse" | "materialize" | "normalize" | "report";
 
 export type ImportProgress = {
   phase: ImportProgressPhase;

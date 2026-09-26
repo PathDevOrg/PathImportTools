@@ -27,6 +27,10 @@ export const rootObjectStreamingFallbackChars = 1_000_000;
 export const rootObjectStreamingFallbackTokens = 20_000;
 export const defaultBqdcQuantizationCm = 100;
 export const progressReportInterval = 500;
+export const observationProgressInterval = 20_000;
+export const timezoneAnchorSpacingS = 21_600;
+export const maximumTimezoneBracketS = 129_600;
+export const maximumTimezoneNearestS = 21_600;
 
 export const sourceOrder: SourceType[] = ["arc-export", "arc-backup", "moves-export"];
 
@@ -39,6 +43,7 @@ export const provider = {
 
 export const timelineNote = {
   arcLowConfidence: "arc_low_confidence",
+  arcBogus: "arc_bogus",
   arcFragmentUnobserved: "arc_fragment_unobserved",
   arcFragmentLowEvidence: "arc_fragment_low_evidence",
   movesPlaceWithoutLocation: "moves_place_without_location",
@@ -50,4 +55,5 @@ export const evidenceKey = {
   auraRevision: "__auraRevision",
   fragmentRepair: "__fragmentRepair",
   fragmentEvidence: "__fragmentEvidence",
+  observationTimestamp: "__observationTs",
 } as const;

@@ -64,7 +64,7 @@ async function runMockedDirectoryCheck(baseUrl) {
                   type: "convert-complete",
                   filename: request.output.filename,
                   size: 3,
-                  savedToDisk: Boolean(request.output.saveHandle),
+                  savedToDisk: Boolean(request.output.saveDirectory),
                   report: {},
                   diagnostics: [],
                 },
@@ -86,7 +86,7 @@ async function runMockedDirectoryCheck(baseUrl) {
   const result = await page.evaluate(() => ({
     savePickerCalled: window.__savePickerCalled,
     outputName: window.__lastOutput?.filename,
-    hasSaveHandle: Boolean(window.__lastOutput?.saveHandle),
+    hasSaveDirectory: Boolean(window.__lastOutput?.saveDirectory),
     githubHref: document.querySelector(".github-badge")?.href,
     body: document.body.innerText,
   }));
@@ -96,7 +96,7 @@ async function runMockedDirectoryCheck(baseUrl) {
   if (errors.length > 0) {
     throw new Error(errors.join("\n"));
   }
-  if (result.savePickerCalled || !result.hasSaveHandle || !result.outputName?.endsWith(".db")) {
+  if (result.savePickerCalled || !result.hasSaveDirectory || !result.outputName?.endsWith(".db")) {
     throw new Error(JSON.stringify(result, null, 2));
   }
   if (

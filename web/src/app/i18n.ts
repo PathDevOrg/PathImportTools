@@ -61,6 +61,7 @@ export type TranslationStrings = Record<keyof typeof productCopy, string> & {
   handoffStep1: string;
   handoffStep2: string;
   handoffStep3: string;
+  rangeReplaceNotice: string;
 };
 
 const enTranslations: TranslationStrings = {
@@ -76,6 +77,8 @@ const enTranslations: TranslationStrings = {
   handoffStep1: "Transfer the .db file to your iPhone via AirDrop or iCloud Drive.",
   handoffStep2: "Open Path on your iPhone, then go to Settings → Data Management → Import Data.",
   handoffStep3: "Select the database file to start importing your timeline.",
+  rangeReplaceNotice:
+    "Importing replaces the timeline Path recorded on your iPhone for {range}. If you used Path during these dates, export a backup in Path first.",
 };
 
 const zhHansTranslations: TranslationStrings = {
@@ -115,6 +118,8 @@ const zhHansTranslations: TranslationStrings = {
   handoffStep1: "通过隔空投送（AirDrop）或存储至 iCloud 云盘将 .db 文件发送至 iPhone。",
   handoffStep2: "在 iPhone 上打开 Path，进入【设置】→【数据管理】→【导入数据】。",
   handoffStep3: "选取该数据库文件，即可开始导入你的历史数据。",
+  rangeReplaceNotice:
+    "导入会替换 Path 在 iPhone 上记录的 {range} 这段时间线。如果你在这段时间也用 Path 记录过，请先在 Path 中导出备份。",
 };
 
 const zhHantTranslations: TranslationStrings = {
@@ -155,6 +160,8 @@ const zhHantTranslations: TranslationStrings = {
   handoffStep1: "透過隔空投送（AirDrop）或儲存至 iCloud 雲碟將 .db 檔案傳送至 iPhone。",
   handoffStep2: "在 iPhone 上開啟 Path，進入【設定】→【資料管理】→【匯入資料】。",
   handoffStep3: "選取該資料庫檔案，即可開始匯入你的歷史資料。",
+  rangeReplaceNotice:
+    "匯入會取代 Path 在 iPhone 上記錄的 {range} 這段時間軸。如果你在這段時間也用 Path 記錄過，請先在 Path 中匯出備份。",
 };
 
 const jaTranslations: TranslationStrings = {
@@ -196,6 +203,8 @@ const jaTranslations: TranslationStrings = {
   handoffStep1: ".dbファイルをAirDropまたはiCloud DriveでiPhoneに転送します。",
   handoffStep2: "iPhoneでPathを開き、【設定】→【データ管理】→【データを読み込む】へ進みます。",
   handoffStep3: "該当のデータベースファイルを選択して、データのインポートを開始します。",
+  rangeReplaceNotice:
+    "インポートすると、iPhone の Path に記録された {range} のタイムラインが置き換えられます。この期間に Path も使用していた場合は、先に Path でバックアップを書き出してください。",
 };
 
 const koTranslations: TranslationStrings = {
@@ -237,6 +246,8 @@ const koTranslations: TranslationStrings = {
   handoffStep1: "AirDrop 또는 iCloud Drive를 통해 .db 파일을 iPhone으로 전송합니다.",
   handoffStep2: "iPhone에서 Path 앱을 열고 [설정] → [데이터 관리] → [데이터 가져오기]로 이동합니다.",
   handoffStep3: "해당 데이터베이스 파일을 선택하여 데이터 가져오기를 시작합니다.",
+  rangeReplaceNotice:
+    "가져오기를 하면 iPhone의 Path에 기록된 {range} 기간의 타임라인이 대체됩니다. 이 기간에 Path도 사용했다면 먼저 Path에서 백업을 내보내세요.",
 };
 
 const deTranslations: TranslationStrings = {
@@ -278,6 +289,8 @@ const deTranslations: TranslationStrings = {
   handoffStep1: "Übertragen Sie die .db-Datei via AirDrop oder iCloud Drive auf Ihr iPhone.",
   handoffStep2: "Öffnen Sie Path auf dem iPhone und gehen Sie zu Einstellungen → Datenverwaltung → Daten importieren.",
   handoffStep3: "Wählen Sie die Datenbankdatei aus, um den Datenimport zu starten.",
+  rangeReplaceNotice:
+    "Der Import ersetzt die Zeitleiste, die Path auf Ihrem iPhone für {range} aufgezeichnet hat. Wenn Sie Path in diesem Zeitraum genutzt haben, exportieren Sie zuerst ein Backup in Path.",
 };
 
 const frTranslations: TranslationStrings = {
@@ -319,6 +332,8 @@ const frTranslations: TranslationStrings = {
   handoffStep1: "Transférez le fichier .db sur votre iPhone via AirDrop ou iCloud Drive.",
   handoffStep2: "Ouvrez Path sur iPhone, puis allez dans Réglages → Gestion des données → Importer des données.",
   handoffStep3: "Sélectionnez le fichier de base de données pour lancer l'importation.",
+  rangeReplaceNotice:
+    "L'importation remplace la chronologie enregistrée par Path sur votre iPhone pour {range}. Si vous avez utilisé Path pendant cette période, exportez d'abord une sauvegarde dans Path.",
 };
 
 const esTranslations: TranslationStrings = {
@@ -360,6 +375,8 @@ const esTranslations: TranslationStrings = {
   handoffStep1: "Transfiere el archivo .db a tu iPhone mediante AirDrop o iCloud Drive.",
   handoffStep2: "Abre Path en tu iPhone y ve a Ajustes → Gestión de datos → Importar datos.",
   handoffStep3: "Selecciona el archivo de base de datos para comenzar a importar.",
+  rangeReplaceNotice:
+    "La importación reemplaza la cronología que Path registró en tu iPhone para {range}. Si usaste Path durante estas fechas, exporta primero una copia de seguridad en Path.",
 };
 
 const allTranslations: Record<LocaleCode, TranslationStrings> = {
@@ -397,6 +414,8 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     handoffStep1: "Envie o arquivo .db para seu iPhone via AirDrop ou iCloud Drive.",
     handoffStep2: "Abra o Path no iPhone e acesse Ajustes → Gerenciamento de Dados → Importar Dados.",
     handoffStep3: "Selecione o arquivo do banco de dados para iniciar a importação.",
+    rangeReplaceNotice:
+      "A importação substitui a linha do tempo que o Path registrou no seu iPhone para {range}. Se você usou o Path nessas datas, exporte antes um backup no Path.",
     privacyStatement:
       "O Path Import foi projetado para funcionar offline: todos os arquivos selecionados são lidos e convertidos localmente neste dispositivo, sem nenhum envio de dados. Depois que a página carregar, você pode desconectar da internet.",
   },
@@ -426,6 +445,8 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     handoffStep1: "Trasferisci il file .db sul tuo iPhone tramite AirDrop o iCloud Drive.",
     handoffStep2: "Apri Path su iPhone, vai in Impostazioni → Gestione dati → Importa dati.",
     handoffStep3: "Seleziona il file del database per avviare l'importazione.",
+    rangeReplaceNotice:
+      "L'importazione sostituisce la cronologia registrata da Path sul tuo iPhone per {range}. Se hai usato Path in queste date, esporta prima un backup in Path.",
     privacyStatement:
       "Path Import è progettato per funzionare offline: tutti i file selezionati vengono letti e convertiti interamente su questo dispositivo, senza alcun caricamento. Una volta caricata la pagina, puoi disconnetterti da Internet.",
   },
@@ -455,6 +476,8 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     handoffStep1: "Stuur het .db-bestand naar je iPhone via AirDrop of iCloud Drive.",
     handoffStep2: "Open Path op je iPhone en ga naar Instellingen → Gegevensbeheer → Gegevens importeren.",
     handoffStep3: "Selecteer het databasebestand om de import te starten.",
+    rangeReplaceNotice:
+      "Importeren vervangt de tijdlijn die Path op je iPhone heeft vastgelegd voor {range}. Heb je Path in deze periode gebruikt, exporteer dan eerst een back-up in Path.",
     privacyStatement:
       "Path Import is ontworpen om offline te werken: alle geselecteerde bestanden worden volledig lokaal op dit apparaat gelezen en geconverteerd, zonder uploads. Zodra de pagina is geladen, kun je de internetverbinding verbreken.",
   },
@@ -470,6 +493,8 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     handoffStep1: "Overfør .db-filen til din iPhone via AirDrop eller iCloud Drive.",
     handoffStep2: "Åbn Path på din iPhone, og gå til Indstillinger → Datastyring → Importer data.",
     handoffStep3: "Vælg databasefilen for at starte importen.",
+    rangeReplaceNotice:
+      "Importen erstatter den tidslinje, Path har registreret på din iPhone for {range}. Hvis du brugte Path i denne periode, skal du først eksportere en sikkerhedskopi i Path.",
     privacyStatement:
       "Path Import er designet til at fungere offline: alle valgte filer læses og konverteres udelukkende lokalt på denne enhed uden upload. Når siden er indlæst, kan du afbryde internetforbindelsen.",
   },
@@ -485,6 +510,8 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     handoffStep1: "Siirrä .db-tiedosto iPhoneesi AirDropin tai iCloud Driven kautta.",
     handoffStep2: "Avaa Path iPhonessasi ja siirry kohtaan Asetukset → Tiedonhallinta → Tuo tiedot.",
     handoffStep3: "Valitse tietokantatiedosto aloittaaksesi tuonnin.",
+    rangeReplaceNotice:
+      "Tuonti korvaa aikajanan, jonka Path on tallentanut iPhoneesi ajalta {range}. Jos käytit Pathia tänä aikana, vie ensin varmuuskopio Pathista.",
     privacyStatement:
       "Path Import on suunniteltu toimimaan offline-tilassa: kaikki valitut tiedostot luetaan ja muunnetaan täysin paikallisesti tällä laitteella ilman tiedonsiirtoa verkkoon. Kun sivu on ladattu, voit katkaista internetyhteyden.",
   },
@@ -500,6 +527,8 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     handoffStep1: "Överför .db-filen till din iPhone via AirDrop eller iCloud Drive.",
     handoffStep2: "Öppna Path på din iPhone och gå till Inställningar → Datahantering → Importera data.",
     handoffStep3: "Välj databasfilen för att starta importen.",
+    rangeReplaceNotice:
+      "Importen ersätter tidslinjen som Path har registrerat på din iPhone för {range}. Om du använde Path under dessa datum, exportera först en säkerhetskopia i Path.",
     privacyStatement:
       "Path Import är utformat för att fungera offline: alla valda filer läses och konverteras helt lokalt på denna enhet, utan uppladdningar. När sidan har laddats kan du koppla från internet.",
   },
@@ -515,6 +544,8 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     handoffStep1: "Prześlij plik .db na swojego iPhone'a przez AirDrop lub iCloud Drive.",
     handoffStep2: "Otwórz Path na iPhonie i przejdź do Ustawienia → Zarządzanie danymi → Importuj dane.",
     handoffStep3: "Wybierz plik bazy danych, aby rozpocząć import.",
+    rangeReplaceNotice:
+      "Import zastępuje oś czasu zapisaną przez Path na iPhonie w okresie {range}. Jeśli w tym czasie używano Path, najpierw wyeksportuj kopię zapasową w Path.",
     privacyStatement:
       "Path Import został zaprojektowany do pracy w trybie offline: wszystkie wybrane pliki są odczytywane i konwertowane w całości lokalnie na tym urządzeniu, bez wysyłania danych. Po załadowaniu strony możesz odłączyć się od internetu.",
   },
@@ -530,6 +561,8 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     handoffStep1: "Передайте файл .db на свій iPhone через AirDrop або iCloud Drive.",
     handoffStep2: "Відкрийте Path на своєму iPhone і перейдіть у Параметри → Керування даними → Імпортувати дані.",
     handoffStep3: "Виберіть файл бази даних, щоб розпочати імпорт.",
+    rangeReplaceNotice:
+      "Імпорт замінить хронологію, яку Path записав на вашому iPhone за {range}. Якщо ви користувалися Path у цей період, спершу експортуйте резервну копію в Path.",
     privacyStatement:
       "Path Import створено для автономної роботи: усі вибрані файли читаються та конвертуються виключно локально на цьому пристрої без завантаження в мережу. Після завантаження сторінки ви можете відключити інтернет.",
   },
@@ -545,6 +578,8 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     handoffStep1: "Transfer file .db ke iPhone Anda melalui AirDrop atau iCloud Drive.",
     handoffStep2: "Buka Path di iPhone Anda, lalu buka Pengaturan → Manajemen Data → Impor Data.",
     handoffStep3: "Pilih file database untuk memulai proses impor.",
+    rangeReplaceNotice:
+      "Impor akan menggantikan linimasa yang direkam Path di iPhone Anda untuk {range}. Jika Anda menggunakan Path pada tanggal tersebut, ekspor cadangan di Path terlebih dahulu.",
     privacyStatement:
       "Path Import dirancang untuk bekerja secara offline: semua file yang Anda pilih dibaca dan dikonversi sepenuhnya di perangkat ini, tanpa unggahan apa pun. Setelah halaman dimuat, Anda dapat memutus koneksi internet.",
   },
@@ -560,6 +595,8 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     handoffStep1: "ถ่ายโอนไฟล์ .db ไปยัง iPhone ของคุณผ่าน AirDrop หรือ iCloud Drive",
     handoffStep2: "เปิด Path บน iPhone ของคุณ แล้วไปที่ การตั้งค่า → การจัดการข้อมูล → นำเข้าข้อมูล",
     handoffStep3: "เลือกไฟล์ฐานข้อมูลเพื่อเริ่มนำเข้าข้อมูล",
+    rangeReplaceNotice:
+      "การนำเข้าจะแทนที่ไทม์ไลน์ที่ Path บันทึกไว้ใน iPhone ของคุณในช่วง {range} หากคุณใช้ Path ในช่วงวันที่ดังกล่าว โปรดส่งออกข้อมูลสำรองใน Path ก่อน",
     privacyStatement:
       "Path Import ได้รับการออกแบบให้ทำงานแบบออฟไลน์: ไฟล์ทั้งหมดที่คุณเลือกจะถูกอ่านและแปลงข้อมูลภายในอุปกรณ์นี้โดยสมบูรณ์ โดยไม่มีการอัปโหลดข้อมูลใดๆ เมื่อหน้าเว็บโหลดเสร็จแล้ว คุณสามารถตัดการเชื่อมต่ออินเทอร์เน็ตได้ทันที",
   },
@@ -575,6 +612,8 @@ const allTranslations: Record<LocaleCode, TranslationStrings> = {
     handoffStep1: "Chuyển tệp .db sang iPhone của bạn qua AirDrop hoặc iCloud Drive.",
     handoffStep2: "Mở Path trên iPhone của bạn, sau đó vào Cài đặt → Quản lý dữ liệu → Nhập dữ liệu.",
     handoffStep3: "Chọn tệp cơ sở dữ liệu để bắt đầu nhập dữ liệu.",
+    rangeReplaceNotice:
+      "Việc nhập sẽ thay thế dòng thời gian mà Path đã ghi trên iPhone của bạn trong khoảng {range}. Nếu bạn đã dùng Path trong những ngày này, hãy xuất bản sao lưu trong Path trước.",
     privacyStatement:
       "Path Import được thiết kế để hoạt động ngoại tuyến: tất cả các tệp bạn chọn được đọc và chuyển đổi hoàn toàn cục bộ trên thiết bị này mà không tải lên bất kỳ dữ liệu nào. Sau khi trang tải xong, bạn có thể ngắt kết nối internet.",
   },

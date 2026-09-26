@@ -10,7 +10,7 @@ import {
 } from "../components/ImportStages";
 import { LanguageSelector } from "../components/LanguageSelector";
 import { type DirectoryPickerHost, type PickedDirectoryFile, pickDirectoryFiles } from "../conversion/directoryPicker";
-import { makeImportFilename, makeUniqueImportFilename } from "../conversion/outputFilename";
+import { makeImportFilename } from "../conversion/outputFilename";
 import { makeWorkerOutputTarget, type SaveFilePickerHost } from "../conversion/outputTarget";
 import { progressPercent } from "../conversion/progressDisplay";
 import type {
@@ -27,6 +27,7 @@ import { productCopy } from "./productCopy";
 export function App() {
   const directoryInputRef = useRef<HTMLInputElement | null>(null);
   const workerRef = useRef<Worker | null>(null);
+  const workerResponseHandlerRef = useRef<(response: WorkerResponse, worker: Worker) => void>(() => undefined);
   const activeRequestRef = useRef<string | null>(null);
   const filesRef = useRef<PickedDirectoryFile[]>([]);
   const downloadUrlRef = useRef<string | null>(null);
@@ -34,7 +35,6 @@ export function App() {
   const autoDownloadedUrlRef = useRef<string | null>(null);
   const outputDirectoryRef = useRef<FileSystemDirectoryHandle | null>(null);
   const outputFilenameRef = useRef<string | null>(null);
-  const pendingOutputFileRef = useRef<{ directory: FileSystemDirectoryHandle; name: string } | null>(null);
   const shouldAskForSaveLocationRef = useRef(false);
   const [stage, setStage] = useState<AppStage>("empty");
   const [progressDetail, setProgressDetail] = useState<WorkerProgress | null>(null);
@@ -64,61 +64,15 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    workerResponseHandlerRef.current = handleWorkerResponse;
+  });
+
+  useEffect(() => {
     let disposed = false;
     const createWorker = () => {
       const nextWorker = new Worker(new URL("../conversion/converter.worker.ts", import.meta.url), { type: "module" });
       nextWorker.onmessage = (event: MessageEvent<WorkerResponse>) => {
-        const response = event.data;
-        if (response.id !== activeRequestRef.current) {
-          return;
-        }
-        if (response.type === "progress") {
-          setProgressDetail(response.progress);
-        } else if (response.type === "scan-complete") {
-          void handleScanComplete(response.id, response.scan.supportedFileCount);
-        } else if (response.type === "convert-complete") {
-          if (response.savedToDisk) {
-            pendingOutputFileRef.current = null;
-          }
-          const url = response.file
-            ? URL.createObjectURL(response.file)
-            : response.bytes
-              ? URL.createObjectURL(new Blob([arrayBufferForBlob(response.bytes)], { type: "application/vnd.sqlite3" }))
-              : null;
-          if (downloadUrlRef.current) {
-            revokeAfterDownloadHandoff(downloadUrlRef.current);
-          }
-          if (outputTokenRef.current) {
-            nextWorker.postMessage({
-              id: crypto.randomUUID(),
-              type: "release-output",
-              outputToken: outputTokenRef.current,
-            } satisfies WorkerRequest);
-          }
-          downloadUrlRef.current = url;
-          outputTokenRef.current = response.outputToken ?? null;
-          autoDownloadedUrlRef.current = null;
-          setDownload({
-            url,
-            filename: response.filename,
-            savedToDisk: response.savedToDisk,
-            diagnostics: response.diagnostics,
-            stats: response.stats,
-          });
-          setStage("complete");
-          setProgressDetail({
-            phase: "export",
-            message: response.savedToDisk ? "File saved" : "Download ready",
-            completed: 1,
-            total: 1,
-          });
-        } else if (response.type === "error") {
-          void discardPendingOutputFile();
-          setStage("error");
-          setErrorTitle(t.errorUnknownTitle);
-          setError(response.message);
-          setProgressDetail(null);
-        }
+        workerResponseHandlerRef.current(event.data, nextWorker);
       };
       return nextWorker;
     };
@@ -164,7 +118,56 @@ export function App() {
         URL.revokeObjectURL(downloadUrlRef.current);
       }
     };
-  }, [t.errorUnknownTitle]);
+  }, []);
+
+  function handleWorkerResponse(response: WorkerResponse, worker: Worker) {
+    if (response.id !== activeRequestRef.current) {
+      return;
+    }
+    if (response.type === "progress") {
+      setProgressDetail(response.progress);
+    } else if (response.type === "scan-complete") {
+      void handleScanComplete(response.id, response.scan.supportedFileCount);
+    } else if (response.type === "convert-complete") {
+      const url = response.file
+        ? URL.createObjectURL(response.file)
+        : response.bytes
+          ? URL.createObjectURL(new Blob([arrayBufferForBlob(response.bytes)], { type: "application/vnd.sqlite3" }))
+          : null;
+      if (downloadUrlRef.current) {
+        revokeAfterDownloadHandoff(downloadUrlRef.current);
+      }
+      if (outputTokenRef.current) {
+        worker.postMessage({
+          id: crypto.randomUUID(),
+          type: "release-output",
+          outputToken: outputTokenRef.current,
+        } satisfies WorkerRequest);
+      }
+      downloadUrlRef.current = url;
+      outputTokenRef.current = response.outputToken ?? null;
+      autoDownloadedUrlRef.current = null;
+      setDownload({
+        url,
+        filename: response.filename,
+        savedToDisk: response.savedToDisk,
+        diagnostics: response.diagnostics,
+        stats: response.stats,
+      });
+      setStage("complete");
+      setProgressDetail({
+        phase: "export",
+        message: response.savedToDisk ? "File saved" : "Download ready",
+        completed: 1,
+        total: 1,
+      });
+    } else if (response.type === "error") {
+      setStage("error");
+      setErrorTitle(t.errorUnknownTitle);
+      setError(response.message);
+      setProgressDetail(null);
+    }
+  }
 
   useEffect(() => {
     document.title = pageTitle(stage, progressDetail);
@@ -196,8 +199,8 @@ export function App() {
     try {
       const outputDirectory = outputDirectoryRef.current;
       const outputFilename = outputFilenameRef.current ?? makeImportFilename();
-      const selectedOutput = outputDirectory
-        ? await makeDirectoryOutputTarget(outputDirectory, outputFilename)
+      const selectedOutput: WorkerOutputTarget | null = outputDirectory
+        ? { filename: outputFilename, saveDirectory: outputDirectory }
         : shouldAskForSaveLocationRef.current
           ? await makeWorkerOutputTarget(window as unknown as SaveFilePickerHost, outputFilename)
           : { filename: outputFilename };
@@ -207,15 +210,13 @@ export function App() {
         }
       ).storage;
       const output =
-        selectedOutput && !selectedOutput.saveHandle && typeof storage?.getDirectory === "function"
+        selectedOutput &&
+        !selectedOutput.saveHandle &&
+        !selectedOutput.saveDirectory &&
+        typeof storage?.getDirectory === "function"
           ? { ...selectedOutput, opfsDownload: true }
           : selectedOutput;
-      pendingOutputFileRef.current =
-        outputDirectory && selectedOutput?.saveHandle
-          ? { directory: outputDirectory, name: selectedOutput.filename }
-          : null;
       if (activeRequestRef.current !== requestId) {
-        void discardPendingOutputFile();
         return;
       }
       if (!output) {
@@ -326,20 +327,6 @@ export function App() {
     setProgressDetail(null);
     setError(null);
     setErrorTitle(null);
-    void discardPendingOutputFile();
-  }
-
-  async function discardPendingOutputFile() {
-    const pending = pendingOutputFileRef.current;
-    pendingOutputFileRef.current = null;
-    if (!pending) {
-      return;
-    }
-    try {
-      await pending.directory.removeEntry(pending.name);
-    } catch {
-      void 0;
-    }
   }
 
   function sendToWorker(type: "scan" | "convert", selectedFiles: PickedDirectoryFile[], output?: WorkerOutputTarget) {
@@ -516,15 +503,6 @@ async function extractDroppedFiles(dataTransfer: DataTransfer): Promise<PickedDi
     await readEntry(entry, "");
   }
   return files;
-}
-
-async function makeDirectoryOutputTarget(
-  directory: FileSystemDirectoryHandle,
-  filename: string,
-): Promise<WorkerOutputTarget> {
-  const uniqueFilename = await makeUniqueImportFilename(directory, filename);
-  const saveHandle = await directory.getFileHandle(uniqueFilename, { create: true });
-  return { filename: saveHandle.name || uniqueFilename, saveHandle };
 }
 
 function arrayBufferForBlob(bytes: Uint8Array): ArrayBuffer {

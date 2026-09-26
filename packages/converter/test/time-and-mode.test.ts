@@ -43,4 +43,8 @@ describe("mapActivityType", () => {
     expect(mapActivityType("cycling")).toBe("bicycle");
     expect(mapActivityType("automotive")).toBe("car");
   });
+
+  test("maps an Arc taxi activity to car", () => {
+    expect(mapActivityType("taxi")).toBe("car");
+  });
 });

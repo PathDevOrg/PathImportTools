@@ -80,13 +80,13 @@ function formatDateRange(range: { startTs: number; endTs: number } | null | unde
     return null;
   }
   try {
-    const formatter = new Intl.DateTimeFormat(locale, { year: "numeric", month: "short" });
+    const formatter = new Intl.DateTimeFormat(locale, { year: "numeric", month: "short", day: "numeric" });
     const start = formatter.format(new Date(range.startTs * 1000));
     const end = formatter.format(new Date(range.endTs * 1000));
     return `${start} — ${end}`;
   } catch {
-    const start = new Date(range.startTs * 1000).toISOString().slice(0, 7);
-    const end = new Date(range.endTs * 1000).toISOString().slice(0, 7);
+    const start = new Date(range.startTs * 1000).toISOString().slice(0, 10);
+    const end = new Date(range.endTs * 1000).toISOString().slice(0, 10);
     return `${start} — ${end}`;
   }
 }
@@ -134,9 +134,10 @@ export function CompleteState({
         </button>
       </div>
 
-      {download.stats && (download.stats.stays > 0 || download.stats.moves > 0) ? (
+      {download.stats && (dateSpan || download.stats.stays > 0 || download.stats.moves > 0) ? (
         <section className="conversion-stats-card" aria-label={t.statsSummary || "Summary"}>
           {dateSpan ? <div className="stats-dates">{dateSpan}</div> : null}
+          {dateSpan ? <p className="stats-range-notice">{t.rangeReplaceNotice.replace("{range}", dateSpan)}</p> : null}
           <div className="stats-grid">
             {days ? (
               <div className="stats-item">

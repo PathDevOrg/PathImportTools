@@ -25,6 +25,7 @@ const activityMap = new Map<string, MoveMode>([
   ["driving", "car"],
   ["drive", "car"],
   ["vehicle", "car"],
+  ["taxi", "car"],
   ["bus", "bus"],
   ["train", "train"],
   ["rail", "train"],

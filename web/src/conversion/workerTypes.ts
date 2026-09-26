@@ -8,6 +8,7 @@ export type WorkerFilePayload = {
 export type WorkerOutputTarget = {
   filename: string;
   saveHandle?: FileSystemFileHandle;
+  saveDirectory?: FileSystemDirectoryHandle;
   opfsDownload?: boolean;
 };
 

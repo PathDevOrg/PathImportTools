@@ -52,14 +52,56 @@ describe("buildImportHandles", () => {
     expect(new TextDecoder().decode(await readChunks(jsonHandle!))).toContain("timelineItems");
   });
 
-  test("uses the nested gzip footer when estimating a zip entry", async () => {
+  test("uses the nested gzip footer when estimating a stored zip entry", async () => {
     const json = strToU8(JSON.stringify({ timelineItems: [], padding: "x".repeat(1_000_000) }));
-    const archive = zipSync({ "Arc/Export/JSON/2024.json.gz": gzipSync(json) });
+    const archive = zipSync({ "Arc/Export/JSON/2024.json.gz": [gzipSync(json), { level: 0 }] });
     const handles = await buildImportHandles([
       filePayload("arc.zip", new File([archive.buffer as ArrayBuffer], "arc.zip", { type: "application/zip" }))
     ]);
 
     expect(handles[0]?.size).toBeGreaterThanOrEqual(json.byteLength);
+  });
+
+  test("estimates a deflated nested gzip entry from its gzip size without inflating it", async () => {
+    const gzip = gzipSync(strToU8(JSON.stringify({ timelineItems: [], padding: "x".repeat(1_000_000) })));
+    const archive = zipSync({ "Arc/Export/JSON/2024.json.gz": [gzip, { level: 6 }] });
+    const handles = await buildImportHandles([
+      filePayload("arc.zip", new File([archive.buffer as ArrayBuffer], "arc.zip", { type: "application/zip" }))
+    ]);
+
+    expect(handles[0]?.size).toBe(gzip.byteLength * 4);
+  });
+
+  test("reads every zip entry when the end record entry count has wrapped", async () => {
+    const archive = zipSync({
+      "Arc/a.json": strToU8("{}"),
+      "Arc/b.json": strToU8("{}"),
+      "Arc/c.json": strToU8("{}")
+    });
+    const patched = new Uint8Array(archive);
+    const view = new DataView(patched.buffer, patched.byteOffset, patched.byteLength);
+    const endOffset = patched.byteLength - 22;
+    view.setUint16(endOffset + 8, 1, true);
+    view.setUint16(endOffset + 10, 1, true);
+    const handles = await buildImportHandles([
+      filePayload("arc.zip", new File([patched.buffer as ArrayBuffer], "arc.zip", { type: "application/zip" }))
+    ]);
+
+    expect(handles.map((entry) => entry.path)).toEqual(["Arc/a.json", "Arc/b.json", "Arc/c.json"]);
+  });
+
+  test("skips macOS AppleDouble metadata in archives and folders", async () => {
+    const archive = zipSync({
+      "Arc/2024.json": strToU8("{}"),
+      "__MACOSX/Arc/._2024.json": strToU8("metadata"),
+      "Arc/._2024.json": strToU8("metadata")
+    });
+    const handles = await buildImportHandles([
+      filePayload("arc.zip", new File([archive.buffer as ArrayBuffer], "arc.zip", { type: "application/zip" })),
+      filePayload("Folder/._2023.json", new File(["metadata"], "._2023.json"))
+    ]);
+
+    expect(handles.map((entry) => entry.path)).toEqual(["Arc/2024.json"]);
   });
 
   test("rejects a zip entry whose content no longer matches its CRC", async () => {

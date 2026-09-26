@@ -9,6 +9,7 @@ Path Import converts Arc and Moves timeline backups into a Path import database.
 - Mixed or reorganized folders whose supported files are no longer in their original paths
 - Writable folder selection on browsers with File System Access
 - Directory input and zip fallbacks, with OPFS-backed downloads when available
+- Older Arc exports without timezone offsets: an event borrows the offset of Moves or Arc observations within a few hours; otherwise its offset stays empty and Path shows it in the device timezone
 
 ## Development
 
@@ -30,7 +31,7 @@ Folder imports are indexed from browser `File` handles and each supported JSON f
 
 Large multi-year archives use either direct file saving or an OPFS-backed download, subject to the browser's local-storage quota. Browsers that provide neither path can still convert smaller archives through the bounded in-memory fallback.
 
-An OPFS-backed download keeps its source file in the site's local storage for up to 24 hours so the browser can finish reading it safely. A later conversion removes expired files; clearing this site's data removes them immediately.
+An OPFS-backed download keeps its source file in the site's local storage until you choose another backup, then removes it after a five-minute grace period so the browser can finish reading it. Files left behind by a closed tab are removed by a later conversion after 24 hours; clearing this site's data removes them immediately.
 
 
 ## License

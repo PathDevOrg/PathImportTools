@@ -5,7 +5,12 @@ import sqlite3InitModule, {
   type SAHPoolUtil,
   type WasmPointer,
 } from "@sqlite.org/sqlite-wasm";
-import { maximumObservationGapS, maximumUnlinkedObservationWindowS, streamingRowBatchSize } from "./constants.js";
+import {
+  evidenceKey,
+  maximumObservationGapS,
+  maximumUnlinkedObservationWindowS,
+  streamingRowBatchSize,
+} from "./constants.js";
 import { acquireStorageLease, cleanupStaleDirectories } from "./opfsStorage.js";
 
 export type ObservationEvidence = {
@@ -635,34 +640,29 @@ export class EvidenceLedger {
     return windows;
   }
 
-  forEachTimelineItem(callback: (timelineItemId: string | null, samples: Record<string, unknown>[]) => void): void {
+  forEachTimezoneOffset(callback: (ts: number, offset: number) => void): void {
     this.seal();
-    let currentItem: string | null | undefined;
-    let samples: Record<string, unknown>[] = [];
-    const flush = (): void => {
-      if (currentItem !== undefined && samples.length > 0) {
-        callback(currentItem, samples);
-      }
-      samples = [];
-    };
-
-    const statement = this.db.prepare(`${selectObservationsSQL} ORDER BY COALESCE(timeline_item_id, ''), ts, identity`);
+    const statement = this.db.prepare(
+      "SELECT ts, timezone_offset FROM observations WHERE timezone_offset IS NOT NULL ORDER BY ts",
+    );
     try {
-      stepRows(statement, this.capi, observationRowFrom, (row) => {
-        const timelineItemId = stringOrNull(row.timeline_item_id);
-        if (currentItem !== undefined && timelineItemId !== currentItem) {
-          flush();
-        }
-        currentItem = timelineItemId;
-        samples.push(observationRowToSample(row));
-        if (timelineItemId === null && samples.length >= streamingRowBatchSize) {
-          flush();
-        }
-      });
+      stepRows(
+        statement,
+        this.capi,
+        (capi, pointer) => ({
+          ts: numberFrom(capi.sqlite3_column_double(pointer, 0)),
+          offset: numberFrom(capi.sqlite3_column_int(pointer, 1)),
+        }),
+        (row) => callback(row.ts, row.offset),
+      );
     } finally {
       statement.finalize();
     }
-    flush();
+  }
+
+  observationCount(): number {
+    this.seal();
+    return numberFrom(this.db.selectValue("SELECT COUNT(*) FROM observations") as number);
   }
 
   forEachCanonicalObservation(callback: (samples: Record<string, unknown>[]) => void): void {
@@ -962,14 +962,16 @@ function compareStringDescending(lhs: ObservationRow[string], rhs: ObservationRo
 
 function observationRowToSample(row: ObservationRow): Record<string, unknown> {
   const ts = numberFrom(row.ts);
+  const timestamp = new Date(ts * 1000).toISOString();
   const sample: Record<string, unknown> = {
-    date: new Date(ts * 1000).toISOString(),
+    date: timestamp,
+    [evidenceKey.observationTimestamp]: ts,
   };
   const lat = numberOrNull(row.lat);
   const lon = numberOrNull(row.lon);
   if (lat !== null && lon !== null) {
     const location: Record<string, unknown> = {
-      timestamp: new Date(ts * 1000).toISOString(),
+      timestamp,
       latitude: lat,
       longitude: lon,
     };

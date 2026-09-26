@@ -4069,3 +4069,308 @@ describe("convertImportEntries", () => {
     expect(result.rows.route_paths).toHaveLength(1);
   });
 });
+
+describe("historical timeline repair rules", () => {
+  const arcSample = (date: string, latitude: number, longitude: number, fields: Record<string, unknown> = {}) => ({
+    date,
+    ...fields,
+    location: { timestamp: date, latitude, longitude, horizontalAccuracy: 10 }
+  });
+
+  test("keeps the longest antimeridian route segment instead of failing the conversion", async () => {
+    const result = await convertImportEntries([
+      text("moves.json", [{
+        date: "20150601",
+        segments: [{
+          type: "move",
+          startTime: "20150601T140000+1200",
+          endTime: "20150601T140200+1200",
+          activities: [{
+            activity: "walking",
+            startTime: "20150601T140000+1200",
+            endTime: "20150601T140200+1200",
+            trackPoints: [
+              { lat: -16.5, lon: 179.97, time: "20150601T140000+1200" },
+              { lat: -16.5, lon: 179.99, time: "20150601T140030+1200" },
+              { lat: -16.5, lon: -179.99, time: "20150601T140100+1200" },
+              { lat: -16.5, lon: -179.97, time: "20150601T140130+1200" },
+              { lat: -16.5, lon: -179.95, time: "20150601T140200+1200" }
+            ]
+          }]
+        }]
+      }])
+    ]);
+
+    expect(result.rows.route_paths).toEqual([expect.objectContaining({
+      sample_count: 3,
+      bbox_min_lon: -179.99,
+      bbox_max_lon: -179.95
+    })]);
+    expect(result.rows.moves[0]?.distance_m).toBeGreaterThan(8_000);
+    expect(result.report.diagnostics.some((diagnostic) => diagnostic.includes("antimeridian"))).toBe(true);
+  });
+
+  test("keeps the remainder of a longer event when a same-start preferred event is shorter", async () => {
+    const result = await convertImportEntries([
+      text("Export/JSON/Daily/2015-06-01.json", { timelineItems: [{
+        itemId: "home-stay",
+        isVisit: true,
+        startDate: "2015-06-01T02:00:00Z",
+        endDate: "2015-06-01T10:00:00Z",
+        center: { latitude: 31.2, longitude: 121.4 },
+        radius: { mean: 20 },
+        place: { placeId: "home", name: "Home", isHome: true, center: { latitude: 31.2, longitude: 121.4 } },
+        samples: []
+      }] }),
+      text("moves.json", [{
+        date: "20150601",
+        segments: [{
+          type: "move",
+          startTime: "20150601T020000Z",
+          endTime: "20150601T022000Z",
+          activities: [{ activity: "walking", startTime: "20150601T020000Z", endTime: "20150601T022000Z", distance: 1500 }]
+        }]
+      }])
+    ]);
+
+    expect(result.rows.moves).toEqual([expect.objectContaining({ start_ts: 1433124000, end_ts: 1433125200 })]);
+    expect(result.rows.stays).toEqual([expect.objectContaining({ start_ts: 1433125200, end_ts: 1433152800 })]);
+  });
+
+  test("keeps distinct Arc places that share a Mapbox venue as separate POIs", async () => {
+    const place = (placeId: string) => ({
+      placeId,
+      name: `Cafe ${placeId}`,
+      center: { latitude: 31.2, longitude: 121.4 },
+      radius: { mean: 20 },
+      lastSaved: "2020-01-01T00:00:00Z"
+    });
+    const visit = (itemId: string, placeId: string, startDate: string, endDate: string) => ({
+      itemId,
+      isVisit: true,
+      startDate,
+      endDate,
+      placeId,
+      center: { latitude: 31.2, longitude: 121.4 },
+      place: { ...place(placeId), mapboxPlaceId: "poi.shared" },
+      samples: []
+    });
+    const result = await convertImportEntries([
+      text("Previous Backups/Place/0/P1.json", place("P1")),
+      text("Previous Backups/Place/0/P2.json", place("P2")),
+      text("Export/JSON/Daily/2020-06-01.json", { timelineItems: [
+        visit("V1", "P2", "2020-06-01T02:00:00Z", "2020-06-01T03:00:00Z"),
+        { itemId: "M1", isVisit: false, activityType: "walking", startDate: "2020-06-01T03:00:00Z", endDate: "2020-06-01T03:10:00Z", samples: [] },
+        visit("V2", "P1", "2020-06-01T03:10:00Z", "2020-06-01T05:00:00Z")
+      ] })
+    ]);
+
+    const identities = result.rows.pois
+      .filter((poi) => poi.provider_poi_id !== null)
+      .map((poi) => `${poi.provider}:${poi.provider_poi_id}`);
+    expect(new Set(identities).size).toBe(identities.length);
+    expect(new Set(result.rows.stays.map((stay) => stay.poi_id)).size).toBe(2);
+  });
+
+  test("replaces an Arc path marked bogus with a no-data gap", async () => {
+    const result = await convertImportEntries([
+      text("Export/JSON/Daily/2021-06-01.json", { timelineItems: [{
+        itemId: "bogus-path",
+        isVisit: false,
+        activityType: "bogus",
+        startDate: "2021-06-01T02:00:00Z",
+        endDate: "2021-06-01T05:00:00Z",
+        samples: []
+      }] })
+    ]);
+
+    expect(result.rows.moves).toHaveLength(0);
+    expect(result.rows.no_data_gaps).toEqual([expect.objectContaining({
+      start_ts: 1622512800,
+      end_ts: 1622523600,
+      notes: "arc_bogus"
+    })]);
+  });
+
+  test("reconstructs an Arc stationary path from stationary samples as a stay", async () => {
+    const samples = Array.from({ length: 10 }, (_, index) => {
+      const date = new Date(Date.UTC(2021, 5, 1, 6, index * 2)).toISOString();
+      return arcSample(date, 31.2 + index * 0.00001, 121.4, { coreMotionActivityType: "stationary", movingState: "stationary" });
+    });
+    const result = await convertImportEntries([
+      text("Export/JSON/Daily/2021-06-01.json", { timelineItems: [{
+        itemId: "stationary-path",
+        isVisit: false,
+        activityType: "stationary",
+        startDate: "2021-06-01T06:00:00Z",
+        endDate: "2021-06-01T06:20:00Z",
+        samples
+      }] })
+    ]);
+
+    expect(result.rows.moves).toHaveLength(0);
+    expect(result.rows.stays).toEqual([expect.objectContaining({ start_ts: 1622527200, end_ts: 1622528400 })]);
+  });
+
+  test("replaces an Arc stationary path without samples with a gap", async () => {
+    const result = await convertImportEntries([
+      text("Export/JSON/Daily/2021-06-01.json", { timelineItems: [{
+        itemId: "empty-stationary-path",
+        isVisit: false,
+        activityType: "stationary",
+        startDate: "2021-06-01T06:00:00Z",
+        endDate: "2021-06-01T06:20:00Z",
+        samples: []
+      }] })
+    ]);
+
+    expect(result.rows.moves).toHaveLength(0);
+    expect(result.rows.no_data_gaps).toEqual([expect.objectContaining({ start_ts: 1622527200, end_ts: 1622528400 })]);
+  });
+
+  test("infers a missing Arc timezone from nearby Moves timestamps", async () => {
+    const result = await convertImportEntries([
+      text("Export/JSON/Daily/2015-06-01.json", { timelineItems: [{
+        itemId: "old-format-stay",
+        isVisit: true,
+        startDate: "2015-06-01T03:00:00Z",
+        endDate: "2015-06-01T05:00:00Z",
+        center: { latitude: 31.2, longitude: 121.4 },
+        samples: [
+          arcSample("2015-06-01T03:00:00Z", 31.2, 121.4, { sampleId: "old-a" }),
+          arcSample("2015-06-01T04:00:00Z", 31.2, 121.4, { sampleId: "old-b" })
+        ]
+      }] }),
+      text("moves.json", [{
+        date: "20150601",
+        segments: [{
+          type: "place",
+          startTime: "20150601T080000+0800",
+          endTime: "20150601T100000+0800",
+          place: { id: 7, name: "Office", location: { lat: 31.3, lon: 121.5 } }
+        }]
+      }])
+    ]);
+
+    expect(result.rows.stays.find((stay) => stay.start_ts === 1433127600)).toEqual(expect.objectContaining({
+      tz_offset_s: 28_800,
+      end_tz_offset_s: 28_800
+    }));
+    expect(result.rows.raw_gps.map((row) => row.tz_offset_s)).toEqual([28_800, 28_800]);
+  });
+
+  test("leaves a missing timezone unresolved across a long hole between agreeing anchors", async () => {
+    const visit = (itemId: string, day: string, fields: Record<string, unknown>) => ({
+      itemId,
+      isVisit: true,
+      startDate: `${day}T10:00:00Z`,
+      endDate: `${day}T12:00:00Z`,
+      center: { latitude: 52.5, longitude: 13.4 },
+      samples: [
+        arcSample(`${day}T10:00:00Z`, 52.5, 13.4, { sampleId: `${itemId}-a`, ...fields }),
+        arcSample(`${day}T11:00:00Z`, 52.5, 13.4, { sampleId: `${itemId}-b`, ...fields })
+      ]
+    });
+    const result = await convertImportEntries([
+      text("Export/JSON/Monthly/2016.json", { timelineItems: [
+        visit("march", "2016-03-01", { secondsFromGMT: 3_600 }),
+        visit("july", "2016-07-01", {}),
+        visit("november", "2016-11-15", { secondsFromGMT: 3_600 })
+      ] })
+    ]);
+
+    expect(result.rows.stays.find((stay) => stay.start_ts === Date.UTC(2016, 6, 1, 10) / 1_000)).toEqual(
+      expect.objectContaining({ tz_offset_s: null, end_tz_offset_s: null })
+    );
+  });
+
+  test("uses the dominant sample activity for a sample-reconstructed Arc move", async () => {
+    const samples = [0, 60, 120, 180].map((seconds, index) => {
+      const date = new Date(Date.parse("2021-03-15T10:00:00Z") + seconds * 1_000).toISOString();
+      return arcSample(date, -33.8688, 151.2093 + index * 0.015, index === 0
+        ? { sampleId: `mixed-${seconds}`, movingState: "moving" }
+        : { sampleId: `mixed-${seconds}`, movingState: "moving", coreMotionActivityType: "cycling" });
+    });
+
+    const result = await convertImportEntries([text("opaque/samples.json", samples)]);
+
+    expect(result.rows.moves).toEqual([expect.objectContaining({ provider: "arc_reconstruction", mode: "bicycle" })]);
+  });
+
+  test("infers a backup-only Arc move mode and route from its own samples", async () => {
+    const samples = [0, 60, 120].map((seconds, index) => {
+      const date = new Date(Date.parse("2021-03-15T10:00:00Z") + seconds * 1_000).toISOString();
+      return arcSample(date, -33.8688, 151.2093 + index * 0.01, {
+        sampleId: `backup-${seconds}`,
+        timelineItemId: "backup-move",
+        coreMotionActivityType: "cycling"
+      });
+    });
+    const result = await convertImportEntries([
+      text("Previous Backups/TimelineItem/B/backup-move.json", {
+        itemId: "backup-move",
+        isVisit: false,
+        startDate: "2021-03-15T10:00:00Z",
+        endDate: "2021-03-15T10:02:00Z",
+        lastSaved: "2021-03-15T10:05:00Z"
+      }),
+      text("Previous Backups/LocomotionSample/2021-W11.json", samples)
+    ]);
+
+    expect(result.rows.moves).toEqual([expect.objectContaining({ provider: "arc_backup", mode: "bicycle" })]);
+    expect(result.rows.moves[0]?.distance_m).toBeGreaterThan(1_500);
+    expect(result.rows.route_paths).toEqual([expect.objectContaining({ move_id: result.rows.moves[0]?.id, sample_count: 3 })]);
+  });
+
+  test("gives an exact duplicate Arc move the route and distance of its backup-only twin", async () => {
+    const samples = [0, 60, 120].map((seconds, index) => {
+      const date = new Date(Date.parse("2021-03-15T10:00:00Z") + seconds * 1_000).toISOString();
+      return arcSample(date, -33.8688, 151.2093 + index * 0.01, {
+        sampleId: `twin-${seconds}`,
+        timelineItemId: "z-backup-twin",
+        coreMotionActivityType: "cycling"
+      });
+    });
+    const result = await convertImportEntries([
+      text("Export/JSON/Daily/2021-03-15.json", { timelineItems: [{
+        itemId: "a-export-twin",
+        isVisit: false,
+        activityType: "cycling",
+        startDate: "2021-03-15T10:00:00Z",
+        endDate: "2021-03-15T10:02:00Z",
+        samples: []
+      }] }),
+      text("Previous Backups/TimelineItem/B/z-backup-twin.json", {
+        itemId: "z-backup-twin",
+        isVisit: false,
+        activityType: "cycling",
+        startDate: "2021-03-15T10:00:00Z",
+        endDate: "2021-03-15T10:02:00Z",
+        lastSaved: "2021-03-15T10:05:00Z"
+      }),
+      text("Previous Backups/LocomotionSample/2021-W11.json", samples)
+    ]);
+
+    expect(result.rows.moves).toHaveLength(1);
+    expect(result.rows.moves[0]?.distance_m).toBeGreaterThan(1_500);
+    expect(result.rows.route_paths).toEqual([expect.objectContaining({ move_id: result.rows.moves[0]?.id })]);
+  });
+
+  test("reports materialization progress between parsing and normalization", async () => {
+    const phases: string[] = [];
+    await convertImportEntries([
+      text("Export/JSON/Daily/2021-06-01.json", { timelineItems: [{
+        itemId: "progress-stay",
+        isVisit: true,
+        startDate: "2021-06-01T02:00:00Z",
+        endDate: "2021-06-01T03:00:00Z",
+        center: { latitude: 1, longitude: 1 },
+        samples: [arcSample("2021-06-01T02:00:00Z", 1, 1)]
+      }] })
+    ], { onProgress: (progress) => phases.push(progress.phase) });
+
+    const lastParse = phases.lastIndexOf("parse");
+    const firstNormalize = phases.indexOf("normalize");
+    expect(phases.slice(lastParse, firstNormalize)).toContain("materialize");
+  });
+});

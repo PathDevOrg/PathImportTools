@@ -26,7 +26,7 @@ const zip64LocatorSignature = 0x07064b50;
 const uint32Max = 0xffffffff;
 const uint16Max = 0xffff;
 const readChunkSize = 256 * 1024;
-const gzipFooterStreamByteLimit = 16 * 1024 * 1024;
+const inflatePushSize = 16 * 1024;
 
 export async function buildImportHandles(
   files: WorkerFilePayload[],
@@ -42,6 +42,10 @@ export async function buildImportHandles(
       completed,
       total: files.length,
     });
+    if (isAppleMetadataPath(payload.path)) {
+      completed += 1;
+      continue;
+    }
     if (payload.path.toLowerCase().endsWith(".zip")) {
       entries.push(...(await indexZipFile(payload.file, options.signal)));
     } else {
@@ -91,32 +95,15 @@ async function estimatedZipEntrySize(file: File, entry: ZipEntry): Promise<numbe
   if (!entry.path.toLowerCase().endsWith(".json.gz") || entry.uncompressedSize < 4) {
     return entry.uncompressedSize;
   }
-  const declaredSize = await gzipDeclaredSize(file, entry);
-  return Math.max(declaredSize ?? 0, entry.uncompressedSize * 4);
+  const declaredSize = entry.compression === 0 ? await storedGzipDeclaredSize(file, entry) : 0;
+  return Math.max(declaredSize, entry.uncompressedSize * 4);
 }
 
-async function gzipDeclaredSize(file: File, entry: ZipEntry): Promise<number | null> {
-  if (entry.compression === 0) {
-    const dataOffset = await zipEntryDataOffset(file, entry);
-    const footer = new Uint8Array(
-      await file.slice(dataOffset + entry.compressedSize - 4, dataOffset + entry.compressedSize).arrayBuffer(),
-    );
-    return readU32(footer, 0);
-  }
-  if (entry.compressedSize > gzipFooterStreamByteLimit) {
-    return null;
-  }
-  let footer = new Uint8Array(0);
-  for await (const chunk of readZipEntryChunks(file, entry)) {
-    const combined = new Uint8Array(Math.min(4, footer.length + chunk.length));
-    const tailStart = Math.max(0, chunk.length - combined.length);
-    const retainedFromFooter = combined.length - (chunk.length - tailStart);
-    if (retainedFromFooter > 0) {
-      combined.set(footer.subarray(footer.length - retainedFromFooter), 0);
-    }
-    combined.set(chunk.subarray(tailStart), retainedFromFooter);
-    footer = combined;
-  }
+async function storedGzipDeclaredSize(file: File, entry: ZipEntry): Promise<number> {
+  const dataOffset = await zipEntryDataOffset(file, entry);
+  const footer = new Uint8Array(
+    await file.slice(dataOffset + entry.compressedSize - 4, dataOffset + entry.compressedSize).arrayBuffer(),
+  );
   return readU32(footer, 0);
 }
 
@@ -133,13 +120,12 @@ async function zipEntryDataOffset(file: File, entry: ZipEntry): Promise<number> 
 async function readCentralDirectory(file: File, signal?: AbortSignal): Promise<ZipEntry[]> {
   const end = await findEndOfCentralDirectory(file);
   throwIfAborted(signal);
-  let totalEntries = readU16(end.bytes, end.offset + 10);
+  const totalEntries = readU16(end.bytes, end.offset + 10);
   let centralDirectorySize = readU32(end.bytes, end.offset + 12);
   let centralDirectoryOffset = readU32(end.bytes, end.offset + 16);
 
   if (totalEntries === uint16Max || centralDirectorySize === uint32Max || centralDirectoryOffset === uint32Max) {
     const zip64 = await readZip64CentralDirectoryInfo(file, end.absoluteOffset);
-    totalEntries = zip64.totalEntries;
     centralDirectorySize = zip64.centralDirectorySize;
     centralDirectoryOffset = zip64.centralDirectoryOffset;
   }
@@ -150,8 +136,8 @@ async function readCentralDirectory(file: File, signal?: AbortSignal): Promise<Z
   throwIfAborted(signal);
   const entries: ZipEntry[] = [];
   let offset = 0;
-  for (let index = 0; index < totalEntries && offset < centralDirectory.length; index += 1) {
-    if (readU32(centralDirectory, offset) !== zipCentralHeaderSignature) {
+  while (offset < centralDirectory.length) {
+    if (offset + 46 > centralDirectory.length || readU32(centralDirectory, offset) !== zipCentralHeaderSignature) {
       throw new Error("Invalid zip central directory");
     }
     const compression = readU16(centralDirectory, offset + 10);
@@ -176,7 +162,7 @@ async function readCentralDirectory(file: File, signal?: AbortSignal): Promise<Z
     const compressedSize = zip64Values.compressedSize ?? compressedSize32;
     const localHeaderOffset = zip64Values.localHeaderOffset ?? localHeaderOffset32;
 
-    if (path.length > 0 && !path.endsWith("/")) {
+    if (path.length > 0 && !path.endsWith("/") && !isAppleMetadataPath(path)) {
       entries.push({ path, compression, crc32, compressedSize, uncompressedSize, localHeaderOffset });
     }
     offset = extraEnd + commentLength;
@@ -201,7 +187,7 @@ async function findEndOfCentralDirectory(
 async function readZip64CentralDirectoryInfo(
   file: File,
   endOffset: number,
-): Promise<{ totalEntries: number; centralDirectorySize: number; centralDirectoryOffset: number }> {
+): Promise<{ centralDirectorySize: number; centralDirectoryOffset: number }> {
   const locatorOffset = endOffset - 20;
   if (locatorOffset < 0) {
     throw new Error("Invalid zip64 file: locator not found");
@@ -216,7 +202,6 @@ async function readZip64CentralDirectoryInfo(
     throw new Error("Invalid zip64 file: end record signature not found");
   }
   return {
-    totalEntries: readU64(record, 32),
     centralDirectorySize: readU64(record, 40),
     centralDirectoryOffset: readU64(record, 48),
   };
@@ -301,15 +286,18 @@ async function* readZipEntryChunks(file: File, entry: ZipEntry): AsyncGenerator<
     for (let offset = 0; offset < entry.compressedSize; offset += readChunkSize) {
       const end = Math.min(entry.compressedSize, offset + readChunkSize);
       const chunk = new Uint8Array(await file.slice(dataOffset + offset, dataOffset + end).arrayBuffer());
-      inflate.push(chunk, end === entry.compressedSize);
-      while (output.length > 0) {
-        const inflated = output.shift()!;
-        produced += inflated.byteLength;
-        if (produced > entry.uncompressedSize) {
-          throw new Error(`Zip entry expands beyond its declared size: ${entry.path}`);
+      for (let start = 0; start < chunk.length; start += inflatePushSize) {
+        const last = end === entry.compressedSize && start + inflatePushSize >= chunk.length;
+        inflate.push(chunk.subarray(start, start + inflatePushSize), last);
+        while (output.length > 0) {
+          const inflated = output.shift()!;
+          produced += inflated.byteLength;
+          if (produced > entry.uncompressedSize) {
+            throw new Error(`Zip entry expands beyond its declared size: ${entry.path}`);
+          }
+          crc = updateCrc32(crc, inflated);
+          yield inflated;
         }
-        crc = updateCrc32(crc, inflated);
-        yield inflated;
       }
     }
     if (produced !== entry.uncompressedSize) {
@@ -332,6 +320,11 @@ async function* readBlobChunks(blob: Blob): AsyncGenerator<Uint8Array> {
   for (let offset = 0; offset < blob.size; offset += readChunkSize) {
     yield new Uint8Array(await blob.slice(offset, offset + readChunkSize).arrayBuffer());
   }
+}
+
+function isAppleMetadataPath(path: string): boolean {
+  const segments = path.replaceAll("\\", "/").split("/");
+  return segments.includes("__MACOSX") || (segments.at(-1) ?? "").startsWith("._");
 }
 
 function normalizeZipPath(path: string): string {

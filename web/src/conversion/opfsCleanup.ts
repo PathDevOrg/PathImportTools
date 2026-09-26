@@ -8,7 +8,40 @@ import {
   timestampFromName,
 } from "@aura-importer/converter";
 
+const outputDirectoryName = "aura-importer-output";
+const releasedOutputRemovalDelayMs = 5 * 60 * 1000;
+
 let cleanupPromise: Promise<void> | null = null;
+
+export function scheduleReleasedOutputRemoval(name: string): void {
+  if (typeof navigator === "undefined" || !navigator.storage?.getDirectory) {
+    return;
+  }
+  setTimeout(() => {
+    void removeReleasedOutput(name).catch(() => undefined);
+  }, releasedOutputRemovalDelayMs);
+}
+
+async function removeReleasedOutput(name: string): Promise<void> {
+  const directory = await outputDirectory();
+  if (directory) {
+    await removeIfLeaseAvailable(`aura-importer-temp:output/${name}`, () =>
+      removeEntryIfPresent(directory, name, false),
+    );
+  }
+}
+
+async function outputDirectory(): Promise<FileSystemDirectoryHandle | null> {
+  const root = await navigator.storage.getDirectory();
+  try {
+    return await root.getDirectoryHandle(outputDirectoryName);
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "NotFoundError") {
+      return null;
+    }
+    throw error;
+  }
+}
 
 export function cleanupStaleImporterStorage(now = Date.now()): Promise<void> {
   if (typeof navigator === "undefined" || !navigator.storage?.getDirectory) {
@@ -31,15 +64,9 @@ async function cleanupStaleImporterStorageOnce(now: number): Promise<void> {
 }
 
 async function cleanupOutputDirectory(now: number): Promise<void> {
-  const root = (await navigator.storage.getDirectory()) as EnumerableDirectoryHandle;
-  let directory: FileSystemDirectoryHandle;
-  try {
-    directory = await root.getDirectoryHandle("aura-importer-output");
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "NotFoundError") {
-      return;
-    }
-    throw error;
+  const directory = await outputDirectory();
+  if (!directory) {
+    return;
   }
   const cutoff = now - staleStorageAgeMs;
   for await (const [name] of (directory as EnumerableDirectoryHandle).entries()) {

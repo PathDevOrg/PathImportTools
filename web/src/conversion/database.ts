@@ -8,7 +8,8 @@ import {
   type TimelineIntegritySummary,
 } from "@aura-importer/converter";
 import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
-import { acquireImporterStorageLease, cleanupStaleImporterStorage } from "./opfsCleanup";
+import { acquireImporterStorageLease, cleanupStaleImporterStorage, scheduleReleasedOutputRemoval } from "./opfsCleanup";
+import { makeUniqueImportFilename } from "./outputFilename";
 import { pathSchema } from "./schema";
 
 type DatabaseProgress = {
@@ -21,7 +22,13 @@ type DatabaseProgress = {
 type DatabaseOutputTarget = {
   filename: string;
   saveHandle?: FileSystemFileHandle;
+  saveDirectory?: FileSystemDirectoryHandle;
   opfsDownload?: boolean;
+};
+
+type SaveTarget = {
+  handle: FileSystemFileHandle;
+  discard: () => Promise<void>;
 };
 
 type DatabaseOutput = {
@@ -254,9 +261,10 @@ export async function createAuraDatabaseWriter(
     ? await initializeSqlite({ locateFile: () => "/sqlite3.wasm", wasmBinary: sqliteWasmBinary })
     : await initializeSqlite();
   await cleanupStaleImporterStorage();
-  const canUseCanonicalOpfs = Boolean((target.saveHandle || target.opfsDownload) && sqlite3.oo1.OpfsDb && sqlite3.opfs);
+  const directSave = Boolean(target.saveHandle || target.saveDirectory);
+  const canUseCanonicalOpfs = Boolean((directSave || target.opfsDownload) && sqlite3.oo1.OpfsDb && sqlite3.opfs);
   const outputMode: AuraDatabaseWriter["outputMode"] =
-    target.saveHandle && canUseCanonicalOpfs
+    directSave && canUseCanonicalOpfs
       ? "direct-save"
       : target.opfsDownload && canUseCanonicalOpfs
         ? "opfs-download"
@@ -414,12 +422,18 @@ export async function createAuraDatabaseWriter(
         }
         onProgress({ phase: "verify", message: "Schema version verified", completed: 4, total: 4 });
 
-        if (target.saveHandle && canUseCanonicalOpfs) {
+        if (directSave && canUseCanonicalOpfs) {
           closeDb();
-          await saveOpfsFile(sqlite3, internalFilename, target.saveHandle, onProgress, options.signal);
+          const save = await openSaveTarget(target);
+          try {
+            await saveOpfsFile(sqlite3, internalFilename, save.handle, onProgress, options.signal);
+          } catch (error) {
+            await save.discard();
+            throw error;
+          }
           await cleanupStorage();
           finished = true;
-          return { filename: target.filename, savedToDisk: true };
+          return { filename: save.handle.name || target.filename, savedToDisk: true };
         }
 
         if (target.opfsDownload && canUseCanonicalOpfs) {
@@ -432,7 +446,10 @@ export async function createAuraDatabaseWriter(
             filename: target.filename,
             savedToDisk: false,
             file,
-            release: releaseStorageLease,
+            release: async () => {
+              await releaseStorageLease();
+              scheduleReleasedOutputRemoval(internalFilename.split("/").at(-1)!);
+            },
           };
         }
 
@@ -456,11 +473,17 @@ export async function createAuraDatabaseWriter(
           bytes = exported;
         }
 
-        if (target.saveHandle) {
-          await saveBytesToFile(target.saveHandle, bytes, onProgress, options.signal);
+        if (directSave) {
+          const save = await openSaveTarget(target);
+          try {
+            await saveBytesToFile(save.handle, bytes, onProgress, options.signal);
+          } catch (error) {
+            await save.discard();
+            throw error;
+          }
           await cleanupStorage();
           finished = true;
-          return { filename: target.filename, savedToDisk: true };
+          return { filename: save.handle.name || target.filename, savedToDisk: true };
         }
 
         await cleanupStorage();
@@ -470,7 +493,11 @@ export async function createAuraDatabaseWriter(
       } catch (error) {
         finalizeStatements();
         if (transactionOpen) {
-          db.exec("ROLLBACK");
+          try {
+            db.exec("ROLLBACK");
+          } catch {
+            void 0;
+          }
           transactionOpen = false;
         }
         await cleanupStorage();
@@ -493,6 +520,22 @@ export async function createAuraDatabaseWriter(
       closeDb();
       await cleanupStorage();
     },
+  };
+}
+
+async function openSaveTarget(target: DatabaseOutputTarget): Promise<SaveTarget> {
+  if (target.saveHandle) {
+    return { handle: target.saveHandle, discard: async () => undefined };
+  }
+  const directory = target.saveDirectory;
+  if (!directory) {
+    throw new Error("No save location was selected");
+  }
+  const name = await makeUniqueImportFilename(directory, target.filename);
+  const handle = await directory.getFileHandle(name, { create: true });
+  return {
+    handle,
+    discard: () => directory.removeEntry(name).catch(() => undefined),
   };
 }
 

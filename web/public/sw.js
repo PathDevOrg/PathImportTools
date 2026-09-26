@@ -70,30 +70,87 @@ self.addEventListener("fetch", (event) => {
   if (!isCacheablePath(url.pathname)) {
     return;
   }
-  event.respondWith(
-    (async () => {
-      const cache = await caches.open(cacheName);
-      const cached = await cache.match(request);
-      if (cached) {
-        void updateCacheInBackground(cache, request);
-        return cached;
-      }
-      try {
-        const networkResponse = await fetch(request);
-        if (networkResponse.ok) {
-          cache.put(request, networkResponse.clone()).catch(() => undefined);
-        }
-        return networkResponse;
-      } catch (error) {
-        const fallback = (await cache.match(url.pathname)) ?? (await cache.match("/index.html"));
-        if (fallback) {
-          return fallback;
-        }
-        throw error;
-      }
-    })(),
-  );
+  event.respondWith(isEntryPath(url.pathname) ? networkFirst(request, url) : cacheFirst(request, url));
 });
+
+async function networkFirst(request, url) {
+  const cache = await caches.open(cacheName);
+  try {
+    const networkResponse = await fetch(request);
+    if (isCacheableResponse(request, networkResponse)) {
+      await cache.put(request, networkResponse.clone());
+      if (url.pathname === manifestUrl) {
+        await pruneStaleAssets(cache, networkResponse.clone());
+      }
+    }
+    return networkResponse;
+  } catch (error) {
+    const fallback = (await cache.match(request)) ?? (await offlineFallback(cache, request, url));
+    if (fallback) {
+      return fallback;
+    }
+    throw error;
+  }
+}
+
+async function cacheFirst(request, url) {
+  const cache = await caches.open(cacheName);
+  const cached = await cache.match(request);
+  if (cached) {
+    void updateCacheInBackground(cache, request);
+    return cached;
+  }
+  try {
+    const networkResponse = await fetch(request);
+    if (isCacheableResponse(request, networkResponse)) {
+      cache.put(request, networkResponse.clone()).catch(() => undefined);
+    }
+    return networkResponse;
+  } catch (error) {
+    const fallback = await offlineFallback(cache, request, url);
+    if (fallback) {
+      return fallback;
+    }
+    throw error;
+  }
+}
+
+async function offlineFallback(cache, request, url) {
+  return (
+    (await cache.match(url.pathname)) ?? (request.mode === "navigate" ? await cache.match("/index.html") : undefined)
+  );
+}
+
+function isEntryPath(pathname) {
+  return pathname === "/" || pathname === "/index.html" || pathname === manifestUrl;
+}
+
+function isCacheableResponse(request, response) {
+  if (!response.ok) {
+    return false;
+  }
+  const contentType = response.headers.get("content-type") ?? "";
+  return (
+    request.mode === "navigate" || isEntryPath(new URL(request.url).pathname) || !contentType.includes("text/html")
+  );
+}
+
+async function pruneStaleAssets(cache, manifestResponse) {
+  try {
+    const manifestPaths = new Set(await manifestResponse.json());
+    const cachedRequests = await cache.keys();
+    await Promise.all(
+      cachedRequests
+        .filter((cachedRequest) => {
+          const pathname = new URL(cachedRequest.url).pathname;
+          return pathname.startsWith("/assets/") && !manifestPaths.has(pathname);
+        })
+        .map((cachedRequest) => cache.delete(cachedRequest)),
+    );
+  } catch {
+    // a manifest that cannot be parsed leaves the existing offline cache intact
+  }
+}
 
 async function warmOfflineAssets(urls) {
   const cache = await caches.open(cacheName);
@@ -110,7 +167,7 @@ async function warmOfflineAssets(urls) {
 async function updateCacheInBackground(cache, request) {
   try {
     const networkResponse = await fetch(request);
-    if (networkResponse.ok) {
+    if (isCacheableResponse(request, networkResponse)) {
       await cache.put(request, networkResponse.clone());
     }
   } catch {
